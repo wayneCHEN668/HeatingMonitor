@@ -48,6 +48,14 @@ class ControlService:
         self.used_tokens: set[str] = set()
 
     # ---------------- 审计 ----------------
+    def record_tool_call(self, agent: str, user: str, tool: str, args: dict, ok: bool, summary: str,
+                         trace_id: str = "", risk: str = "") -> None:
+        """记录智能体工具调用（谁问的、哪个智能体、调了什么、入参、结论）。"""
+        self._audit("tool_call", f"{agent}（代 {user}）", str(args.get("station_id") or args.get("object_id")
+                    or args.get("scope_id") or args.get("draft_id") or args.get("command_id") or "-"),
+                    {"tool": tool, "risk": risk, "args": args, "summary": summary[:200], "trace_id": trace_id},
+                    "ok" if ok else "error")
+
     def _audit(self, action: str, user: str, target: str, detail: dict, result: str):
         self.audit.insert(0, {"id": uuid.uuid4().hex[:10], "ts": now_local().isoformat(timespec="seconds"),
                               "action": action, "user": user, "target": target, "detail": detail,
@@ -141,6 +149,8 @@ class ControlService:
     # ---------------- 2. 安全校验 ----------------
     def safety_check(self, draft_id: str, user: str = "system") -> dict:
         d = self._draft(draft_id)
+        if d["status"] in ("executed", "rejected", "expired"):
+            raise ControlError("BAD_STATE", f"草案状态为 {d['status']}，不能再次校验")
         cfg = STATION_BY_ID[d["station_id"]]
         lim = LIMITS
         cur = d["before"]
@@ -232,19 +242,79 @@ class ControlService:
         self._audit("approve", approver, d["station_id"], {"draft_id": d["draft_id"], "comment": comment}, "signed")
 
     def approve(self, draft_id: str, approver: str, comment: str = "") -> dict:
+        """人工签发令牌。只供人机界面调用，不暴露给智能体（MCP 工具层没有对应工具）。"""
         d = self._draft(draft_id)
+        self._expire(d)
         if not d["check"]:
             raise ControlError("NOT_CHECKED", "草案尚未通过安全校验")
         if d["check"]["verdict"] == "block":
             raise ControlError("BLOCKED", "安全校验未通过（block），不能签发令牌")
-        if d["status"] in ("executed", "rejected"):
+        if d["status"] in ("executed", "rejected", "expired"):
             raise ControlError("BAD_STATE", f"草案状态为 {d['status']}")
         self._sign(d, approver, comment or "人工确认")
+        if d.get("approval_request"):
+            d["approval_request"]["resolved"] = "approved"
         return d
+
+    def request_approval(self, draft_id: str, user: str, reason: str = "", timeout_s: int = 900) -> dict:
+        """提交审批（R2）：只登记待审批并通知值班调度，不签发令牌。
+
+        智能体调用这个接口后，必须等待人工在界面上批准，才能拿到一次性令牌。
+        L3/L4 站点在安全校验 pass 时已由安全网关自动签发，这里直接返回现状。
+        """
+        d = self._draft(draft_id)
+        self._expire(d)
+        if d["status"] == "approved":
+            return d
+        if not d["check"]:
+            raise ControlError("NOT_CHECKED", "草案尚未做安全校验，请先调用安全校验")
+        if d["check"]["verdict"] == "block":
+            raise ControlError("BLOCKED", "安全校验结论为 block，不能提交审批")
+        if d["status"] != "checked" and d["status"] != "pending_approval":
+            raise ControlError("BAD_STATE", f"草案状态为 {d['status']}，不能提交审批")
+        if d["status"] == "pending_approval":
+            return d
+        timeout_s = int(min(max(timeout_s, 60), 3600))
+        now = now_local()
+        d["approval_request"] = {
+            "approval_id": "AP" + uuid.uuid4().hex[:8].upper(), "requested_by": user, "reason": reason,
+            "ts": now.isoformat(timespec="seconds"),
+            "expires_at": (now + timedelta(seconds=timeout_s)).isoformat(timespec="seconds"),
+            "approvers": self.policy(d["station_id"])["approvers"], "resolved": None,
+        }
+        d["status"] = "pending_approval"
+        self._audit("request_approval", user, d["station_id"],
+                    {"draft_id": draft_id, "approval_id": d["approval_request"]["approval_id"], "reason": reason},
+                    "pending")
+        return d
+
+    def _expire(self, d: dict):
+        req = d.get("approval_request")
+        if d["status"] == "pending_approval" and req and req["expires_at"] < now_local().isoformat(timespec="seconds"):
+            d["status"] = "expired"
+            req["resolved"] = "expired"
+            self._audit("approval_expired", "system", d["station_id"], {"draft_id": d["draft_id"]}, "expired")
+
+    def get_draft(self, draft_id: str) -> dict:
+        d = self._draft(draft_id)
+        self._expire(d)
+        return d
+
+    def pending_approvals(self) -> list[dict]:
+        out = []
+        for d in self.list_drafts():
+            self._expire(d)
+            if d["status"] == "pending_approval":
+                out.append(d)
+        return out
 
     def reject(self, draft_id: str, user: str, comment: str = "") -> dict:
         d = self._draft(draft_id)
+        if d["status"] == "executed":
+            raise ControlError("BAD_STATE", "草案已执行，不能驳回（如需撤销请回滚指令）")
         d["status"] = "rejected"
+        if d.get("approval_request"):
+            d["approval_request"]["resolved"] = "rejected"
         self._audit("reject", user, d["station_id"], {"draft_id": draft_id, "comment": comment}, "rejected")
         return d
 

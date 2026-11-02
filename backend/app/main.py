@@ -79,6 +79,7 @@ async def ticker():
         now = time.time()
         try:
             S.engine.tick(now - last)
+            S.engine.snapshot["pending_approvals"] = len(S.control.pending_approvals())
         except Exception:  # noqa: BLE001
             log.exception("tick failed")
         last = now
@@ -277,6 +278,48 @@ def execute(draft_id: str, body: ExecBody):
     return env(c, f"指令 {c['command_id']} 已下发并收到设备回执")
 
 
+class ApprovalRequestBody(BaseModel):
+    user: str = "调度智能体"
+    reason: str = ""
+    timeout_s: int = 900
+
+
+class ToolCallBody(BaseModel):
+    agent: str
+    user: str
+    tool: str
+    args: dict = {}
+    ok: bool = True
+    summary: str = ""
+    trace_id: str = ""
+    risk: str = ""
+
+
+@app.post("/api/control/drafts/{draft_id}/request-approval")
+def request_approval(draft_id: str, body: ApprovalRequestBody):
+    d = S.control.request_approval(draft_id, body.user, body.reason, body.timeout_s)
+    if d["status"] == "approved":
+        return env(d, "该草案已签发令牌（L3 站点安全网关自动签发或已人工批准）")
+    return env(d, f"已提交审批 {d['approval_request']['approval_id']}，等待值班调度确认")
+
+
+@app.get("/api/control/drafts/{draft_id}")
+def get_draft(draft_id: str):
+    return env(S.control.get_draft(draft_id))
+
+
+@app.get("/api/control/approvals")
+def approvals():
+    return env(S.control.pending_approvals())
+
+
+@app.post("/api/audit/tool-calls")
+def tool_call_audit(body: ToolCallBody):
+    S.control.record_tool_call(body.agent, body.user, body.tool, body.args, body.ok, body.summary,
+                               body.trace_id, body.risk)
+    return env({"recorded": True})
+
+
 @app.get("/api/control/drafts")
 def drafts(station_id: str | None = None):
     return env(S.control.list_drafts(station_id))
@@ -359,8 +402,10 @@ def curve(sid: str, target: float = 20.0):
 
 
 @app.get("/api/ai/effect/{sid}")
-def control_effect(sid: str):
-    return env(S.ai.control_effect(sid))
+def control_effect(sid: str, switch: str | None = None):
+    if sid not in STATION_BY_ID:
+        raise HTTPException(404, f"站点 {sid} 不存在")
+    return env(S.ai.control_effect(sid, datetime.fromisoformat(switch) if switch else None))
 
 
 @app.get("/api/ai/diagnosis")

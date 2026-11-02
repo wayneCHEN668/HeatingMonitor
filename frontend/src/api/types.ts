@@ -160,6 +160,7 @@ export interface Snapshot {
     elec_price: number
   }
   alarms: Alarm[]
+  pending_approvals?: number
   today: {
     network: Record<string, number>
     objects: Record<string, Record<string, number>>
@@ -192,10 +193,19 @@ export interface Draft {
   source: string
   created_by: string
   created_at: string
-  status: 'drafted' | 'checked' | 'blocked' | 'approved' | 'executed' | 'rejected'
+  status: 'drafted' | 'checked' | 'blocked' | 'pending_approval' | 'approved' | 'executed' | 'rejected' | 'expired'
   expected: { before: Prediction; after: Prediction }
   check: { verdict: 'pass' | 'warn' | 'block'; items: CheckItem[]; ts: string } | null
   approval: { approver: string; comment: string; token: string; expires_at: string; ts: string } | null
+  approval_request?: {
+    approval_id: string
+    requested_by: string
+    reason: string
+    ts: string
+    expires_at: string
+    approvers: string[]
+    resolved: string | null
+  }
   command_id?: string
 }
 

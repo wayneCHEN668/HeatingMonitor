@@ -15,6 +15,7 @@
           <template #title>
             {{ m.title }}
             <el-badge v-if="m.path === '/alarms' && rt.alarmCount" :value="rt.alarmCount" class="menu-badge" />
+            <el-badge v-if="m.path === '/commands' && rt.snap?.pending_approvals" :value="rt.snap.pending_approvals" type="warning" class="menu-badge" />
           </template>
         </el-menu-item>
       </el-menu>

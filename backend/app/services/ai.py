@@ -360,6 +360,10 @@ class AIService:
             switch = now - timedelta(days=ADOPTIONS[sid])
         pre = (switch - timedelta(days=window_days), switch)
         post = (switch, min(switch + timedelta(days=window_days), now))
+        post_hours = (post[1] - post[0]).total_seconds() / 3600
+        if post_hours < 12:
+            raise ValueError(f"调整后仅有 {max(post_hours, 0):.1f} 小时数据，至少需要 12 小时才能评估效果；"
+                             "短期跟踪请使用指令效果跟踪")
         controls = [s.id for s in STATIONS if s.id not in ADOPTIONS and s.id not in ("ST03", "ST07", "ST10")]
 
         def norm(oid, a, b):

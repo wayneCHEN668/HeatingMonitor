@@ -258,3 +258,32 @@ export interface CommandRequest {
   reason?: string
   source?: 'manual' | 'ai'
 }
+
+export interface Me {
+  username: string
+  name: string
+  role: string
+  role_name: string
+  kind: 'human' | 'agent'
+  agent: string | null
+  profile: string | null
+  label: string
+  permissions: string[]
+  scope: { global: boolean; sources: string[]; stations: string[] }
+}
+
+export interface AgentTokenRecord {
+  jti: string
+  owner: string
+  owner_name: string
+  agent: string
+  profile: string
+  profile_name: string
+  note: string
+  permissions: string[]
+  created_at: string
+  expires_at: string
+  revoked: boolean
+  revoked_at?: string
+  last_used: string | null
+}

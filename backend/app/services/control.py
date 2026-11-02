@@ -97,7 +97,8 @@ class ControlService:
                 "valve_set": round(s.valve_set, 1), "freq": s.freq}
 
     # ---------------- 1. 草拟 ----------------
-    def draft(self, station_id: str, param: str, value, user: str, reason: str = "", source: str = "manual") -> dict:
+    def draft(self, station_id: str, param: str, value, user: str, reason: str = "", source: str = "manual",
+              owner: str = "") -> dict:
         self._cfg(station_id)
         if param not in PARAM_TEXT:
             raise ControlError("BAD_PARAM", f"不支持的参数 {param}")
@@ -138,7 +139,7 @@ class ControlService:
             "draft_id": "DR" + uuid.uuid4().hex[:8].upper(), "station_id": station_id,
             "station_name": STATION_BY_ID[station_id].name, "param": param, "param_text": PARAM_TEXT[param],
             "value": value, "override": override, "before": cur, "description": desc, "reason": reason,
-            "source": source, "created_by": user, "created_at": now_local().isoformat(timespec="seconds"),
+            "source": source, "created_by": user, "owner": owner, "created_at": now_local().isoformat(timespec="seconds"),
             "status": "drafted", "expected": {"before": before, "after": after},
             "check": None, "approval": None,
         }

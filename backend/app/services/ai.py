@@ -77,12 +77,15 @@ class AIService:
         r = self._oof_rel_resid(X, y)
         return self._fit(X, y), float(np.quantile(r, 0.1)), float(np.quantile(r, 0.9))
 
-    def forecast(self, scope: str = "NET", horizon: int = 72) -> dict:
+    def forecast(self, scope: str = "NET", horizon: int = 72, sources: frozenset[str] | None = None) -> dict:
+        """sources 为数据范围；scope=NET 时预测的是该范围内的汇总负荷。"""
+        if scope != "NET":
+            sources = None
         horizon = int(np.clip(horizon, 6, 168))
-        key = ("fc", scope, horizon, now_local().strftime("%Y%m%d%H"))
+        key = ("fc", scope, horizon, tuple(sorted(sources)) if sources else None, now_local().strftime("%Y%m%d%H"))
         if key in self._cache:
             return self._cache[key]
-        df = self.store.frame(scope)
+        df = self.store.frame(scope, sources)
         df = df[df["season"] == "this"]
         df = df.iloc[-24 * 30:]                     # 最近 30 天滚动窗口
         y = df["heat_mw"]
@@ -122,12 +125,12 @@ class AIService:
         if len(df) < 24 * 21:
             warnings.append("本季数据不足 21 天，预测区间可能偏窄，建议结合上季同期数据校准")
         cap = SOURCE_BY_ID[scope].capacity_mw if scope in SOURCE_BY_ID else (
-            sum(s.capacity_mw for s in SOURCES) if scope == "NET" else None)
+            sum(s.capacity_mw for s in SOURCES if sources is None or s.id in sources) if scope == "NET" else None)
         if cap and float(p90.max()) > 0.9 * cap:
             warnings.append(f"P90 峰值 {p90.max():.1f}MW 超过装机容量 {cap}MW 的 90%，请提前安排调峰")
         tmin = float(tf.min())
         data = {
-            "scope": scope, "scope_name": name_of(scope), "horizon": horizon,
+            "scope": scope, "scope_name": name_of(scope, sources), "horizon": horizon,
             "history": {"ts": [t.strftime("%m-%d %H:%M") for t in hist.index],
                         "heat_mw": [_r(v) for v in hist["heat_mw"]], "tout": [_r(v) for v in hist["tout"]]},
             "forecast": {"ts": [t.strftime("%m-%d %H:%M") for t in fidx], "p10": [_r(v) for v in p10],
@@ -142,7 +145,7 @@ class AIService:
             "capacity_mw": cap, "train_ms": int((time.time() - t0) * 1000),
             "model": "GradientBoosting 均值模型 + 时序交叉验证残差分位数区间（split conformal）",
         }
-        summary = (f"{name_of(scope)}未来 {horizon}h 负荷峰值约 {p50[pk]:.1f}MW（P90 {p90[pk]:.1f}MW），"
+        summary = (f"{name_of(scope, sources)}未来 {horizon}h 负荷峰值约 {p50[pk]:.1f}MW（P90 {p90[pk]:.1f}MW），"
                    f"出现在 {fidx[pk].strftime('%m-%d %H时')}；预报最低气温 {tmin:.1f}℃。")
         res = envelope(summary, data, evidence=[f"近 48h 留出回测 MAPE {mape:.1f}%",
                                  f"P10–P90 样本外覆盖率 {cover:.0f}%（名义 80%）"],
@@ -407,7 +410,10 @@ class AIService:
     # ==================================================================
     # 5. 综合诊断 + 运行评分
     # ==================================================================
-    def diagnosis(self) -> dict:
+    def diagnosis(self, sources: frozenset[str] | None = None) -> dict:
+        """sources 为数据范围：评分与结论只覆盖可见站点；能效评分的中位数基准仍取全网，保证跨用户可比。"""
+        def vis(st):
+            return sources is None or st.source_id in sources
         now = now_local()
         start = now - timedelta(hours=24)
         findings = []
@@ -419,8 +425,11 @@ class AIService:
             h = float(np.clip(18 - d["tout"], 0, None).sum() / 24)
             norms[s.id] = float(d["heat_gj"].sum() * 1e6 / (s.area * max(h, 0.1)))
         med = float(np.median(list(norms.values())))
-        an = {e["station_id"]: e for e in self.anomalies()["data"]["events"]}
+        an = {e["station_id"]: e for e in self.anomalies()["data"]["events"]
+              if vis(STATION_BY_ID[e["station_id"]])}
         for s in STATIONS:
+            if not vis(s):
+                continue
             d = self.store.stations[s.id]
             d = d[d.index >= start]
             tin = float(d["tin"].mean())
@@ -454,17 +463,19 @@ class AIService:
                              "object": e["station_name"], "object_id": e["station_id"], "title": e["type"],
                              "detail": "；".join(e["evidence"][:2]), "advice": e["advice"],
                              "action": {"type": "anomaly", "station_id": e["station_id"]}})
-        fc = self.forecast("NET", 72)["data"]
+        fc = self.forecast("NET", 72, sources)["data"]
         tf = np.array(fc["forecast"]["tout"], dtype=float)
         cur_t = fc["history"]["tout"][-1]
         if tf.min() < cur_t - 5:
             i = int(np.argmin(tf))
-            findings.append({"level": "warn", "category": "预测", "object": "全网", "object_id": "NET",
+            findings.append({"level": "warn", "category": "预测", "object": name_of("NET", sources), "object_id": "NET",
                              "title": f"降温预警：{fc['forecast']['ts'][i]} 预计 {tf.min():.1f}℃",
                              "detail": f"较当前下降 {cur_t - tf.min():.1f}℃，负荷峰值 P90 {fc['peak']['p90']}MW。",
                              "advice": "建议提前 3–6 小时预升温，并安排调峰热源备用。",
                              "action": {"type": "forecast", "scope": "NET"}})
         for src in SOURCES:
+            if sources is not None and src.id not in sources:
+                continue
             f = self.forecast(src.id, 72)["data"]
             if f["peak"]["p90"] and f["peak"]["p90"] > 0.85 * src.capacity_mw:
                 findings.append({"level": "warn", "category": "预测", "object": src.name, "object_id": src.id,
@@ -475,7 +486,7 @@ class AIService:
         findings.sort(key=lambda f: order[f["level"]])
         scores.sort(key=lambda s: s["total"])
         avg = float(np.mean([s["total"] for s in scores]))
-        summ = (f"全网运行评分 {avg:.0f} 分；发现 {sum(1 for f in findings if f['level'] == 'danger')} 项严重问题、"
+        summ = (f"{name_of('NET', sources)}运行评分 {avg:.0f} 分；发现 {sum(1 for f in findings if f['level'] == 'danger')} 项严重问题、"
                 f"{sum(1 for f in findings if f['level'] == 'warn')} 项提示。")
         return envelope(summ, {"findings": findings, "scores": scores, "score_avg": _r(avg, 0), "median_norm_heat": _r(med, 1),
                                "weights": {"comfort": 0.35, "efficiency": 0.3, "stability": 0.15, "health": 0.2}},

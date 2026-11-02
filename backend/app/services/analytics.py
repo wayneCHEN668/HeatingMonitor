@@ -35,19 +35,25 @@ def hdd(tout: pd.Series) -> float:
     return float(np.clip(T_BALANCE - tout, 0, None).sum() / 24.0)
 
 
-def area_of(oid: str) -> float:
+def _in_scope(source_id: str, sources) -> bool:
+    return sources is None or source_id in sources
+
+
+def area_of(oid: str, sources=None) -> float:
     if oid in STATION_BY_ID:
         return STATION_BY_ID[oid].area
     if oid in SOURCE_BY_ID:
         return sum(s.area for s in STATIONS if s.source_id == oid)
-    return sum(s.area for s in STATIONS)
+    return sum(s.area for s in STATIONS if _in_scope(s.source_id, sources))
 
 
-def name_of(oid: str) -> str:
+def name_of(oid: str, sources=None) -> str:
     if oid in STATION_BY_ID:
         return STATION_BY_ID[oid].name
     if oid in SOURCE_BY_ID:
         return SOURCE_BY_ID[oid].name
+    if sources is not None:
+        return "、".join(x.name for x in SOURCES if x.id in sources) + " 片区"
     return "全网"
 
 
@@ -55,18 +61,18 @@ class Analytics:
     def __init__(self, store: HistoryStore):
         self.store = store
 
-    def _slice(self, oid: str, start: datetime, end: datetime) -> pd.DataFrame:
-        df = self.store.frame(oid)
+    def _slice(self, oid: str, start: datetime, end: datetime, sources=None) -> pd.DataFrame:
+        df = self.store.frame(oid, sources)
         return df.loc[(df.index >= start) & (df.index < end)]
 
-    def _summary(self, oid: str, df: pd.DataFrame) -> dict:
+    def _summary(self, oid: str, df: pd.DataFrame, sources=None) -> dict:
         if df.empty:
-            return {"id": oid, "name": name_of(oid), "hours": 0}
-        a = area_of(oid)
+            return {"id": oid, "name": name_of(oid, sources), "hours": 0}
+        a = area_of(oid, sources)
         h = hdd(df["tout"])
         heat = float(df["heat_gj"].sum())
         out = {
-            "id": oid, "name": name_of(oid), "hours": int(len(df)), "area_wm2": a / 1e4,
+            "id": oid, "name": name_of(oid, sources), "hours": int(len(df)), "area_wm2": a / 1e4,
             "tout_avg": _r(df["tout"].mean()), "hdd": _r(h), "heat_gj": _r(heat, 1),
             "elec_kwh": _r(df["elec_kwh"].sum(), 0), "water_t": _r(df["water_t"].sum(), 1),
             "heat_mw_max": _r(df["heat_mw"].max()), "heat_mw_avg": _r(df["heat_mw"].mean()),
@@ -103,12 +109,12 @@ class Analytics:
         return out
 
     # ------------------------------------------------------------------
-    def daily(self, day: date | None, scope: str = "NET") -> dict:
+    def daily(self, day: date | None, scope: str = "NET", sources=None) -> dict:
         now = now_local()
         day = day or now.date()
         start = datetime.combine(day, datetime.min.time())
         end = start + timedelta(days=1)
-        df = self._slice(scope, start, end)
+        df = self._slice(scope, start, end, sources)
         if df.empty:
             raise ValueError(f"{day} 无运行数据")
         cols = [c for c in ("tout", "heat_mw", "tin", "ts1", "tr1", "ts2", "tr2", "ts2_set", "g", "g1", "valve",
@@ -116,9 +122,9 @@ class Analytics:
                 if c in df.columns]
         series = {"ts": [t.strftime("%H:%M") for t in df.index],
                   **{c: [_r(v) for v in df[c].tolist()] for c in cols}}
-        summ = self._summary(scope, df)
-        prev = self._summary(scope, self._slice(scope, start - timedelta(days=1), start))
-        last = self._summary(scope, self._slice(scope, start - YEAR, end - YEAR))
+        summ = self._summary(scope, df, sources)
+        prev = self._summary(scope, self._slice(scope, start - timedelta(days=1), start, sources), sources)
+        last = self._summary(scope, self._slice(scope, start - YEAR, end - YEAR, sources), sources)
         cmp = {}
         for k in ("heat_gj", "norm_heat", "elec_kwh", "water_t", "tin_avg", "tout_avg"):
             a, b, c = summ.get(k), prev.get(k), last.get(k)
@@ -127,7 +133,8 @@ class Analytics:
                       "yoy": _r((a - c) / c * 100, 1) if a is not None and c else None}
         # 子对象明细
         if scope == "NET":
-            children = [s.id for s in SOURCES] + [s.id for s in STATIONS]
+            children = ([s.id for s in SOURCES if _in_scope(s.id, sources)]
+                        + [s.id for s in STATIONS if _in_scope(s.source_id, sources)])
         elif scope in SOURCE_BY_ID:
             children = [s.id for s in STATIONS if s.source_id == scope]
         else:
@@ -136,7 +143,7 @@ class Analytics:
         peak_i = int(np.argmax(df["heat_mw"].to_numpy()))
         findings = self._daily_findings(scope, summ, prev, rows)
         return {
-            "date": day.isoformat(), "scope": scope, "scope_name": name_of(scope), "partial": end > now,
+            "date": day.isoformat(), "scope": scope, "scope_name": name_of(scope, sources), "partial": end > now,
             "summary": summ, "compare": cmp, "series": series, "rows": rows,
             "peak": {"time": df.index[peak_i].strftime("%H:%M"), "heat_mw": _r(df["heat_mw"].iloc[peak_i])},
             "findings": findings,
@@ -166,10 +173,12 @@ class Analytics:
         return f
 
     # ------------------------------------------------------------------
-    def energy(self, start: datetime, end: datetime) -> dict:
+    def energy(self, start: datetime, end: datetime, scope=None) -> dict:
         """节能分析：度日数修正后的单耗对标、同比节能量、过热潜力。"""
         rows = []
         for s in STATIONS:
+            if not _in_scope(s.source_id, scope):
+                continue
             cur = self._summary(s.id, self._slice(s.id, start, end))
             base = self._summary(s.id, self._slice(s.id, start - YEAR, end - YEAR))
             r = dict(cur)
@@ -199,14 +208,16 @@ class Analytics:
 
         sources = []
         for src in SOURCES:
+            if not _in_scope(src.id, scope):
+                continue
             cur = self._summary(src.id, self._slice(src.id, start, end))
             base = self._summary(src.id, self._slice(src.id, start - YEAR, end - YEAR))
             cur["base_unit_cost"] = base.get("unit_cost")
             cur["base_norm_heat"] = base.get("norm_heat")
             sources.append(cur)
 
-        net = self._summary("NET", self._slice("NET", start, end))
-        net_base = self._summary("NET", self._slice("NET", start - YEAR, end - YEAR))
+        net = self._summary("NET", self._slice("NET", start, end, scope), scope)
+        net_base = self._summary("NET", self._slice("NET", start - YEAR, end - YEAR, scope), scope)
         saved = sum(r.get("saved_gj") or 0 for r in rows)
         net_out = {
             **net, "base_norm_heat": net_base.get("norm_heat"),
@@ -221,8 +232,8 @@ class Analytics:
         d = start
         while d < end:
             nd = d + timedelta(days=1)
-            a = self._summary("NET", self._slice("NET", d, nd))
-            b = self._summary("NET", self._slice("NET", d - YEAR, nd - YEAR))
+            a = self._summary("NET", self._slice("NET", d, nd, scope), scope)
+            b = self._summary("NET", self._slice("NET", d - YEAR, nd - YEAR, scope), scope)
             trend.append({"date": d.strftime("%m-%d"), "norm_heat": a.get("norm_heat"),
                           "base_norm_heat": b.get("norm_heat"), "tout": a.get("tout_avg"),
                           "base_tout": b.get("tout_avg"), "heat_gj": a.get("heat_gj")})
@@ -237,7 +248,7 @@ class Analytics:
                    "unit_heat": ("面积热耗", "GJ/万m²"), "norm_heat": ("修正单耗", "kJ/(m²·℃·d)"),
                    "tin": ("平均室温", "℃"), "cost_yuan": ("运行成本", "元")}
 
-    def multidim(self, metric: str, level: str, grain: str, start: datetime, end: datetime) -> dict:
+    def multidim(self, metric: str, level: str, grain: str, start: datetime, end: datetime, sources=None) -> dict:
         """多维透视：对象（热源/热力站）× 时间粒度（day / hour / weekday）。"""
         if metric not in self.METRIC_TEXT:
             raise ValueError("不支持的指标")
@@ -248,6 +259,7 @@ class Analytics:
         if metric == "cost_yuan":
             ids = [s.id for s in SOURCES]
             level = "source"
+        ids = [i for i in ids if _in_scope(STATION_BY_ID[i].source_id if i in STATION_BY_ID else i, sources)]
         cols_set: list = []
         matrix = []
         totals = []

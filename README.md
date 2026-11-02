@@ -19,7 +19,9 @@ npm install
 npm run dev          # http://localhost:5173 ，/api 与 /ws 自动代理到 8000
 ```
 
-或直接执行根目录的 `./run.sh` 同时启动两端。测试：`cd backend && pytest -q`（21 项），前端类型检查：`cd frontend && npm run typecheck`。
+或直接执行根目录的 `./run.sh` 同时启动两端。打开页面后用演示账号登录（登录页可一键选择，见下文[身份认证、权限与数据范围](#身份认证权限与数据范围)）。
+
+测试：`cd backend && pytest -q`（32 项），前端类型检查：`cd frontend && npm run typecheck`。
 
 接入大模型智能体（MCP）见下文 [MCP 智能体工具服务](#mcp-智能体工具服务)。
 
@@ -34,6 +36,7 @@ npm run dev          # http://localhost:5173 ，/api 与 /ws 自动代理到 800
 | | `/stations/:id` 工艺图 + 控制 | 一次侧调节阀—板换—二次循环泵—补水—楼栋全流程实时数据；**远程控制**：气候补偿曲线（拖拽编辑 + 载入 AI 推荐）、阀门开度、控制模式/定供温、循环泵频率 |
 | 统计分析 | `/analytics` | 日运行分析（日环比/同比、逐时曲线、结论、分对象报表、CSV 导出）；节能分析（度日数修正单耗、同比节能量、标煤/CO₂、过热挖潜、室温–能耗矩阵、热源单位成本）；多维统计（指标 × 对象 × 时间粒度透视、热力图） |
 | AI 运行分析 | `/ai` | 综合诊断与运行评分、负荷预测（P10/P50/P90）、异常检测、一站一策曲线优化（可一键生成调控草案）、调控效果评估（DiD） |
+| 智能体授权 | `/agents` | 为 MCP 智能体签发/撤销委托令牌，签发前预览生效权限，只显示一次并附客户端配置 |
 | 调控与审计 | `/commands` | **待审批**（智能体提交的调控请求，人工批准/驳回）、指令记录（可回滚）、草案、审计日志（可筛选智能体工具调用） |
 | 报警中心 | `/alarms` | 活动报警确认、报警历史 |
 
@@ -90,11 +93,52 @@ Q = k2·(Tin − Tout)      （围护结构）
 ### 6. 调控效果评估（`control_effect`）
 双重差分（DiD）：`(处理站 后/前 − 1) − (对照组 后/前 − 1)`，指标为度日数修正单耗，对照组为同期未调整且无异常的站点，从而扣除天气和共同趋势的影响。
 
+## 身份认证、权限与数据范围
+
+对应设计文档第十一节“安全护栏”：**权限不靠提示词约束，而在服务端强制执行。** 除登录与健康检查外，所有 REST 接口和 WebSocket 都要求令牌；每个接口声明所需权限，对象访问一律经过数据范围检查；业务记录与审计里的操作人取自令牌，不信任请求体。
+
+### 角色与权限
+
+| 角色 | 演示账号 / 密码 | 数据范围 | 权限 |
+|---|---|---|---|
+| 系统管理员 | admin / admin123 | 全网 | 全部 |
+| 值班调度长 | chief / chief123 | 全网 | 查看、确认报警、草拟/下发、**批准**、审计、委托智能体 |
+| 调度员 | dispatcher / disp123 | 全网 | 查看、确认报警、草拟/下发（**不能批准**）、委托智能体 |
+| 经营管理 | manager / mgr123 | 全网 | 查看监控、统计、AI；委托智能体 |
+| 片区站长 | zhao / zhao123 | 城北燃气调峰锅炉房 片区（HS02 + ST07–ST10） | 查看、确认报警；委托智能体 |
+| 客服坐席 | service / svc123 | 全网 | 仅实时监控与报警查看；委托智能体 |
+
+演示账号只用于本地演示，生产环境设置 `HEATNET_DEMO=0` 关闭登录页的账号列表，并接入企业统一身份认证。
+
+### 数据范围
+
+片区用户看到的“全网”就是**自己片区的汇总**：总览、拓扑、实时推送、历史、日报、节能分析、多维统计、负荷预测（NET）、诊断评分、异常检测、调控指令和审计全部按范围过滤；访问范围外对象返回 `403 OUT_OF_SCOPE`。能效评分的中位数基准仍取全网，保证不同用户看到的评分可比。
+
+### 调控审批与令牌
+
+- 调度员草拟并通过安全校验后只能“提交审批”；值班调度长在“调控与审计 → 待审批”中批准，批准人取自登录身份。
+- 批准接口要求 `control:approve` 权限**且必须是人工会话**；任何智能体委托令牌都拿不到这项权限。
+- 下发令牌只返回给草案所属用户（本人或代其工作的智能体），审批人本身拿不到。
+
+### 智能体委托令牌
+
+用户在“智能体授权”页为智能体签发委托令牌：
+
+- **生效权限 = 智能体档案白名单 ∩ 委托人权限**。档案有两种：调度智能体（查看 + 草拟 + 下发）、分析智能体（只读）。例如站长签发“调度智能体”令牌，因为站长本人没有调控权，智能体也没有。
+- 数据范围与委托人相同；有效期最长 90 天；可随时撤销，撤销后立即失效（包括已建立的实时推送）。
+- 登记簿只保存令牌的登记信息（智能体、档案、权限、到期、最近使用），不保存令牌明文。
+
+### 实现说明（`backend/app/auth.py`）
+
+- 令牌为 HMAC-SHA256 签名的 JSON（会话 12 小时，委托最长 90 天），带 `jti` 便于注销/撤销；签名密钥取环境变量 `HEATNET_SECRET`，未设置时每次启动随机生成（重启后需重新登录、重新签发委托令牌）。
+- 密码以 PBKDF2-SHA256 加盐存储；同一账号 5 分钟内连续失败 5 次锁定。
+- 用户、令牌登记簿和审计都在内存中，演示用；生产环境需持久化。
+
 ## MCP 智能体工具服务
 
 `backend/mcp_server/` 按《智慧供热平台 · 智能体工具清单设计》把平台能力包装成 MCP 工具，Claude Desktop、Claude Code 或任何 MCP 客户端都可以直接调用。
 
-### 工具清单（16 个）
+### 工具清单（17 个）
 
 | 工具 | 风险 | 功能 |
 |---|---|---|
@@ -102,6 +146,7 @@ Q = k2·(Tin − Tout)      （围护结构）
 | `data_get_realtime` | R0 | 热源/热力站/全网实时快照，附通讯状态与当前报警 |
 | `data_get_timeseries_summary` | R0 | 历史时序统计摘要（均值/极值/趋势/离群点），原始序列用 `data_ref` 引用 |
 | `data_get_alarms` | R0 | 报警查询，按热源范围、级别、确认状态过滤 |
+| `data_get_weather` | R0 | 气温实况、近 24h 统计、逐日/逐时预报，寒潮与较大降温预警（仿真气象源仅有气温） |
 | `analyze_anomaly_detect` | R1 | 多变量异常检测，返回疑似类型、证据、处置建议 |
 | `analyze_energy_benchmark` | R1 | 度日数修正单耗对标、同比节能、过热挖潜、热源单位成本 |
 | `analyze_control_effect` | R1 | 双重差分评估调控效果（按指令号或站点） |
@@ -122,16 +167,16 @@ Q = k2·(Tin − Tout)      （围护结构）
 - **智能体不能批准自己的指令。** MCP 里没有任何“批准”工具。`control_request_approval` 只登记待审批；值班调度在平台 **调控与审计 → 待审批** 中看到申请智能体、理由、安全校验结果和仿真前后对比，批准后系统才签发令牌。L3 站点在校验全部 pass 时由安全网关自动签发，与人工操作同一套规则。
 - **安全校验在后端强制执行**：MCP 服务只是 REST API 的薄客户端，绕过它直接调接口也逃不过校验与令牌验证。
 - **模型不搬运数据**：曲线优化结果通过 `plan_ref` 交给 `control_draft_command`，由服务端重新取方案，避免模型抄错曲线数值。
-- **按智能体分权**：`--profile dispatch`（调度智能体，16 个工具）或 `--profile analyst`（只读分析，9 个，不加载任何 `control_*`）。
-- **全程审计**：每次工具调用记录智能体、所代表的用户、工具、风险等级、入参（令牌不落库）、结论和 trace_id，在审计日志中可按“智能体工具调用”筛选。
+- **身份由委托令牌决定**：MCP 服务启动时用令牌调用 `/api/auth/me`，只注册令牌权限覆盖的工具。调度员签发的调度智能体有 17 个工具；分析智能体 10 个；客服委托的智能体只有 5 个数据查询工具。人工登录令牌不能用来启动 MCP 服务。
+- **全程审计**：每次工具调用记录“智能体（代 委托人）”、工具、风险等级、入参（令牌不落库）、结论和 trace_id，身份由后端从令牌解析，智能体无法冒充他人；可选 `--model-label`（或 `HEATNET_MODEL`）把模型/客户端版本一并记入。
 
 ### 运行与接入
 
-先启动后端（`uvicorn app.main:app --port 8000`），再按客户端配置 MCP 服务：
+先启动后端（`uvicorn app.main:app --port 8000`），登录平台，在“智能体授权”页签发委托令牌（页面会直接生成下面的配置），再按客户端配置 MCP 服务：
 
 ```bash
 # Claude Code
-claude mcp add heatnet -- python /绝对路径/backend/run_mcp.py --api http://127.0.0.1:8000
+claude mcp add heatnet -e HEATNET_TOKEN=<委托令牌> -- python /绝对路径/backend/run_mcp.py --api http://127.0.0.1:8000
 ```
 
 Claude Desktop（`claude_desktop_config.json`）：
@@ -141,22 +186,21 @@ Claude Desktop（`claude_desktop_config.json`）：
   "mcpServers": {
     "heatnet": {
       "command": "python",
-      "args": ["/绝对路径/backend/run_mcp.py", "--api", "http://127.0.0.1:8000", "--profile", "dispatch",
-               "--agent", "调度智能体", "--user", "张调度"]
+      "args": ["/绝对路径/backend/run_mcp.py", "--api", "http://127.0.0.1:8000"],
+      "env": { "HEATNET_TOKEN": "<委托令牌>" }
     }
   }
 }
 ```
 
-也可以以 HTTP 方式供多个客户端共用：`python run_mcp.py --transport streamable-http --port 8765`，地址 `http://127.0.0.1:8765/mcp`。参数也可用环境变量 `HEATNET_API`、`HEATNET_PROFILE`、`HEATNET_AGENT`、`HEATNET_USER` 设置。
+也可以以 HTTP 方式供多个客户端共用：`python run_mcp.py --transport streamable-http --port 8765`，地址 `http://127.0.0.1:8765/mcp`。参数也可用环境变量 `HEATNET_API`、`HEATNET_TOKEN`、`HEATNET_MODEL` 设置；令牌建议用环境变量传入，避免出现在进程列表里。
 
 典型对话：“科技园站是不是太热了？能不能调一下？”→ 智能体依次调用 `data_search_objects` → `data_get_realtime` → `optimize_station_curve` → `control_draft_command(plan_ref)` → `control_safety_check` → `control_request_approval`，然后提示你去平台批准；批准后再调用 `control_request_approval` 取令牌 → `control_execute` → `control_monitor_effect`。
 
 ### 当前局限
 
-- 平台没有登录体系：批准接口本身不鉴权，智能体身份（`--agent`/`--user`）来自配置而非认证。生产环境须在安全网关中加入 RBAC，并让批准只接受已认证的人工会话。
-- 审计中没有记录模型版本（MCP 协议不提供，需要智能体框架侧传入）。
-- 设计文档其余 32 个工具（运维客服、知识库、接入实施等）尚未实现。
+- 模型版本只能由接入方通过 `--model-label` 自报（MCP 协议不提供），无法独立核验。
+- 设计文档其余 31 个工具（运维客服、知识库、接入实施等）尚未实现；熔断（频繁回滚时自动降为 L1）尚未实现。
 
 ## 目录结构
 
@@ -168,8 +212,11 @@ backend/
   app/main.py              REST + WebSocket（统一返回封套 ok/summary/data/evidence/confidence/warnings/trace_id）
   mcp_server/              MCP 工具服务（server 工具定义 · client 后端客户端 · __main__ 命令行）
   run_mcp.py               MCP 启动脚本（可用绝对路径运行）
+  app/auth.py              身份认证、角色权限、数据范围、智能体委托令牌
+  app/services/weather_svc.py  气象实况与预报、寒潮判定
   tests/test_api.py        机理一致性、调控链路、统计、AI 的 13 项测试
-  tests/test_mcp.py        MCP 端到端 8 项测试（真实 MCP 客户端 → MCP 服务 → 后端）
+  tests/test_auth.py       认证、权限、数据范围、委托令牌 9 项测试
+  tests/test_mcp.py        MCP 端到端 10 项测试（真实 MCP 客户端 → MCP 服务（委托令牌）→ 后端）
 frontend/src/
   components/diagrams/     StationDiagram / SourceDiagram / NetworkTopology 工艺图（SVG，实时绑定 + 流动动画）
   components/              ClimateCurveEditor（可拖拽曲线）· CommandWizard（五步下发）· EChart · KpiCard
@@ -184,6 +231,7 @@ frontend/src/
 | `sim/realtime.py` 仿真引擎 | SCADA/PLC 采集（OPC UA、Modbus、MQTT），点位映射到标准指标名 |
 | `HistoryStore` 内存 DataFrame | 时序库（TDengine / TimescaleDB / InfluxDB） |
 | `ControlService._apply` 改内存状态 | 指令总线下发到 PLC，并以设备回读确认回执 |
-| 令牌密钥进程内随机生成、无用户体系 | 独立安全网关 + RBAC（智能体权限 = 智能体白名单 ∩ 用户权限）、密钥管理 |
+| 内存中的演示用户与 PBKDF2 密码 | 企业统一身份认证（LDAP / OAuth2 / OIDC），角色与数据范围由组织架构同步 |
+| 令牌密钥来自环境变量或启动时随机生成 | 密钥管理服务（KMS）托管、定期轮换；令牌登记簿持久化 |
 | 草案/指令/审计存内存 | 关系库持久化，审计至少保存一个完整采暖季 |
-| 智能体身份来自 MCP 启动参数 | 认证后的用户身份随请求传递，批准仅接受已认证的人工会话 |
+| 批准在同一后端进程内完成 | 安全网关独立部署，批准与令牌签发只在网关内进行 |

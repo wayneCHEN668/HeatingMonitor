@@ -49,6 +49,11 @@
       </div>
     </div>
   </div>
+  <div v-else-if="rt.meta" class="page">
+    <el-empty description="该热源不存在，或不在你的数据范围内">
+      <el-button @click="$router.back()">返回</el-button>
+    </el-empty>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -65,7 +70,8 @@ import { fmt, fmtInt, KIND_TEXT } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
-const { snap, meta } = storeToRefs(useRealtime())
+const rt = useRealtime()
+const { snap, meta } = storeToRefs(rt)
 const id = computed(() => route.params.id as string)
 const h = computed(() => snap.value?.sources[id.value])
 const today = computed(() => (snap.value?.today.objects[id.value] ?? {}) as Record<string, number>)
@@ -76,7 +82,7 @@ const fc = ref<any>(null)
 watch(
   id,
   async (v) => {
-    if (!v?.startsWith('HS')) return
+    if (!v?.startsWith('HS') || !rt.sourceMeta[v]) return   // 不在数据范围内：不发请求，显示空状态
     hist.value = null
     fc.value = null
     hist.value = await getData(`/api/history/${v}?hours=48&metrics=ts1,tr1,g,heat_mw`)

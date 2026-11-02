@@ -18,7 +18,8 @@
         <el-table-column label="确认" width="120">
           <template #default="{ row }">
             <span v-if="row.acked" class="muted">已确认</span>
-            <el-button v-else size="small" link type="primary" @click="ack(row.id)">确认</el-button>
+            <el-button v-else-if="auth.has('alarm:ack')" size="small" link type="primary" @click="ack(row.id)">确认</el-button>
+            <span v-else class="muted">未确认</span>
           </template>
         </el-table-column>
       </el-table>
@@ -43,10 +44,12 @@ import { ElMessage } from 'element-plus'
 import KpiCard from '@/components/KpiCard.vue'
 import { getData, postData } from '@/api/http'
 import type { Alarm } from '@/api/types'
+import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { LEVEL_TEXT, LEVEL_TYPE } from '@/utils/format'
 
 const rt = useRealtime()
+const auth = useAuth()
 const { snap } = storeToRefs(rt)
 const hist = ref<Alarm[]>([])
 const count = (l: number) => snap.value!.alarms.filter((a) => a.level === l).length
@@ -56,7 +59,7 @@ const dur = (ts: string) => {
   return m < 60 ? `${m} 分钟` : `${(m / 60).toFixed(1)} 小时`
 }
 async function ack(id: string) {
-  await postData(`/api/alarms/${id}/ack`, { user: '调度员' })
+  await postData(`/api/alarms/${id}/ack`)
   ElMessage.success('已确认')
   rt.poll()
 }

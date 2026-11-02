@@ -1,14 +1,14 @@
 <template>
   <div class="page">
     <el-tabs v-model="tab">
-      <el-tab-pane name="approve">
+      <el-tab-pane v-if="auth.hasAny('control:draft', 'control:approve')" name="approve">
         <template #label>待审批 <el-badge v-if="pending.length" :value="pending.length" class="tab-badge" /></template>
         <div class="panel bar">
-          <span class="muted">当前审批人</span>
-          <el-select v-model="approver" size="small" style="width: 140px">
-            <el-option v-for="a in ['值班调度长', '运行主任', '技术总工']" :key="a" :value="a" />
-          </el-select>
-          <span class="muted small">智能体（MCP）只能草拟和提交审批；批准后系统签发一次性令牌，智能体凭令牌下发。</span>
+          <template v-if="auth.has('control:approve')">
+            <span class="muted">审批人：<b>{{ auth.me?.label }}</b></span>
+            <span class="muted small">智能体与调度员只能草拟和提交审批；批准后系统签发一次性令牌，由申请方凭令牌下发。</span>
+          </template>
+          <span v-else class="muted small">以下为待值班调度长审批的请求（只读）。你提交的请求批准后，可在“草案”页下发。</span>
         </div>
         <el-empty v-if="!pending.length" description="暂无待审批的调控请求" />
         <div v-for="d in pending" :key="d.draft_id" class="panel req">
@@ -41,7 +41,7 @@
               </div>
             </div>
           </div>
-          <div class="ops">
+          <div v-if="auth.has('control:approve')" class="ops">
             <el-input v-model="comments[d.draft_id]" size="small" placeholder="审批意见（可选）" style="max-width: 360px" />
             <el-button size="small" type="danger" plain @click="decide(d, false)">驳回</el-button>
             <el-button size="small" type="primary" @click="decide(d, true)">批准并签发令牌</el-button>
@@ -70,7 +70,7 @@
           </el-table>
         </div>
       </el-tab-pane>
-      <el-tab-pane label="草案" name="draft">
+      <el-tab-pane v-if="auth.hasAny('control:draft', 'control:approve')" label="草案" name="draft">
         <div class="panel">
           <el-table :data="drafts" size="small">
             <el-table-column prop="draft_id" label="草案号" width="110" />
@@ -82,11 +82,17 @@
               <el-tag v-if="row.check" size="small" :type="({ pass: 'success', warn: 'warning', block: 'danger' } as any)[row.check.verdict]">{{ row.check.verdict }}</el-tag>
             </template></el-table-column>
             <el-table-column label="状态" width="100"><template #default="{ row }">{{ STATUS[row.status] ?? row.status }}</template></el-table-column>
-            <el-table-column label="审批人" width="130"><template #default="{ row }">{{ row.approval?.approver }}</template></el-table-column>
+            <el-table-column label="审批人" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.approver }}</template></el-table-column>
+            <el-table-column label="操作" width="80">
+              <template #default="{ row }">
+                <el-button v-if="row.status === 'approved' && row.approval?.token && auth.has('control:execute')"
+                           size="small" link type="warning" @click="execute(row)">下发</el-button>
+              </template>
+            </el-table-column>
           </el-table>
         </div>
       </el-tab-pane>
-      <el-tab-pane label="审计日志" name="audit">
+      <el-tab-pane v-if="auth.has('audit:read')" label="审计日志" name="audit">
         <div class="panel">
           <el-radio-group v-model="auditFilter" size="small" class="mb">
             <el-radio-button value="">全部</el-radio-button>
@@ -118,6 +124,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getData, postData } from '@/api/http'
 import type { Command, Draft } from '@/api/types'
+import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { fmt } from '@/utils/format'
 
@@ -127,12 +134,12 @@ const STATUS: Record<string, string> = {
 }
 const router = useRouter()
 const rt = useRealtime()
+const auth = useAuth()
 const tab = ref('cmd')
 const cmds = ref<Command[]>([])
 const drafts = ref<Draft[]>([])
 const pending = ref<Draft[]>([])
 const audit = ref<any[]>([])
-const approver = ref('值班调度长')
 const comments = ref<Record<string, string>>({})
 const auditFilter = ref('')
 const auditRows = computed(() =>
@@ -141,19 +148,26 @@ const auditRows = computed(() =>
 let first = true
 
 async function load() {
+  const ctl = auth.hasAny('control:draft', 'control:approve')
   ;[cmds.value, drafts.value, pending.value, audit.value] = await Promise.all([
     getData<Command[]>('/api/control/commands'),
-    getData<Draft[]>('/api/control/drafts'),
-    getData<Draft[]>('/api/control/approvals'),
-    getData<any[]>('/api/audit'),
+    ctl ? getData<Draft[]>('/api/control/drafts') : Promise.resolve([]),
+    ctl ? getData<Draft[]>('/api/control/approvals') : Promise.resolve([]),
+    auth.has('audit:read') ? getData<any[]>('/api/audit') : Promise.resolve([]),
   ])
-  if (first && pending.value.length) tab.value = 'approve'
+  if (first && pending.value.length && auth.has('control:approve')) tab.value = 'approve'
   first = false
+}
+async function execute(d: Draft) {
+  await ElMessageBox.confirm(`凭 ${d.approval?.approver} 签发的令牌下发：${d.station_name} ${d.description}？`, '下发', { type: 'warning' })
+  const c = await postData<Command>(`/api/control/drafts/${d.draft_id}/execute`, { token: d.approval!.token })
+  ElMessage.success(`指令 ${c.command_id} 已下发`)
+  load()
 }
 async function decide(d: Draft, ok: boolean) {
   if (!ok) await ElMessageBox.confirm(`驳回 ${d.station_name} 的调控请求？`, '驳回', { type: 'warning' })
   await postData(`/api/control/drafts/${d.draft_id}/${ok ? 'approve' : 'reject'}`, {
-    approver: approver.value, comment: comments.value[d.draft_id] || (ok ? '同意下发' : '驳回'),
+    comment: comments.value[d.draft_id] || (ok ? '同意下发' : '驳回'),
   })
   ElMessage.success(ok ? '已签发令牌，等待智能体下发' : '已驳回')
   load()

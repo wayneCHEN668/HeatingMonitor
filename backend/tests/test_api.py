@@ -10,6 +10,9 @@ from app.sim.physics import build_station_model
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
+        tok = c.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()["data"]["token"]
+        c.headers["Authorization"] = f"Bearer {tok}"
+        c.token = tok
         yield c
 
 
@@ -52,7 +55,7 @@ def test_meta_and_realtime(client):
 
 
 def test_websocket(client):
-    with client.websocket_connect("/ws/realtime") as ws:
+    with client.websocket_connect(f"/ws/realtime?token={client.token}") as ws:
         msg = ws.receive_json()
         assert msg["type"] == "snapshot" and "stations" in msg["data"]
 
@@ -77,7 +80,7 @@ def test_control_full_flow_and_rollback(client):
     assert r.status_code == 400 and r.json()["error"]["code"] == "TOKEN_INVALID"
     chk = data(client.post(f"/api/control/drafts/{d['draft_id']}/check"))
     assert chk["check"]["verdict"] in ("pass", "warn")
-    ap = data(client.post(f"/api/control/drafts/{d['draft_id']}/approve", json={"approver": "张调度"}))
+    ap = data(client.post(f"/api/control/drafts/{d['draft_id']}/approve", json={"comment": "同意"}))
     token = ap["approval"]["token"]
     cmd = data(client.post(f"/api/control/drafts/{d['draft_id']}/execute", json={"token": token}))
     s = data(client.get("/api/control/settings/ST02"))

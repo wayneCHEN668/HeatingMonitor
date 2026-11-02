@@ -39,7 +39,7 @@
               <div class="kv"><span class="k">预计节热</span><span class="num" :class="d.saving_pct > 0 ? 'ok' : 'warn'">{{ d.saving_pct }}% · {{ d.saving_gj_day }} GJ/天</span></div>
             </div>
             <div class="act">
-              <el-button type="success" @click="sendDraft">生成调控草案并走审批流程</el-button>
+              <el-button v-if="auth.has('control:draft')" type="success" @click="sendDraft">生成调控草案并走审批流程</el-button>
               <el-button @click="router.push(`/stations/${sel}`)">打开站点控制页</el-button>
               <span class="muted small">AI 只生成方案，下发须经过安全校验与令牌确认。</span>
             </div>
@@ -59,10 +59,12 @@ import EChart from '@/components/EChart.vue'
 import CommandWizard from '@/components/CommandWizard.vue'
 import EnvelopeInfo from './EnvelopeInfo.vue'
 import { api } from '@/api/http'
+import { useAuth } from '@/stores/auth'
 import type { CommandRequest, Envelope } from '@/api/types'
 
 const props = defineProps<{ station: string }>()
 const router = useRouter()
+const auth = useAuth()
 const overview = ref<Envelope<any> | null>(null)
 const env = ref<Envelope<any> | null>(null)
 const d = computed(() => env.value?.data)

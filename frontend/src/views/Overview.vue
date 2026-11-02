@@ -1,7 +1,7 @@
 <template>
   <div class="page" v-if="snap && meta">
     <div class="grid kpis">
-      <KpiCard label="全网热负荷" :value="fmt(snap.network.heat_mw)" unit="MW" tone="supply"
+      <KpiCard label="热负荷" :value="fmt(snap.network.heat_mw)" unit="MW" tone="supply"
                :sub="`装机 ${snap.network.capacity_mw}MW · 负荷率 ${fmt((snap.network.heat_mw / snap.network.capacity_mw) * 100)}%`" />
       <KpiCard label="今日供热量" :value="fmtInt(today.heat_gj)" unit="GJ" :sub="`面积热耗 ${fmt((today.heat_gj / snap.network.area) * 1e4, 2)} GJ/万m²`" />
       <KpiCard label="今日电耗" :value="fmtInt(today.elec_kwh)" unit="kWh" :sub="`当前电价 ${snap.network.elec_price} 元/kWh`" />
@@ -44,7 +44,7 @@
 
     <div class="grid bottom">
       <div class="panel">
-        <div class="panel-title">全网热负荷与室外温度 <span class="sub">近 72 小时</span></div>
+        <div class="panel-title">热负荷与室外温度 <span class="sub">近 72 小时</span></div>
         <EChart :option="trendOpt" height="260px" />
       </div>
       <div class="panel">

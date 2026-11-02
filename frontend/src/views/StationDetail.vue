@@ -39,7 +39,7 @@
     </div>
 
     <!-- 远程控制 -->
-    <div class="panel" v-if="settings && policy">
+    <div class="panel" v-if="settings && policy && auth.has('control:draft')">
       <div class="panel-title">
         远程控制
         <span class="sub">当前：{{ MODE_TEXT[settings.mode] }} · 阀门设定 {{ fmt(settings.valve_set) }}% · 泵 {{ fmt(settings.freq) }}Hz
@@ -122,6 +122,11 @@
 
     <CommandWizard v-model="wizard" :request="req" @done="refresh" />
   </div>
+  <div v-else-if="rt.meta" class="page">
+    <el-empty description="该热力站不存在，或不在你的数据范围内">
+      <el-button @click="$router.back()">返回</el-button>
+    </el-empty>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -136,12 +141,14 @@ import ClimateCurveEditor from '@/components/ClimateCurveEditor.vue'
 import CommandWizard from '@/components/CommandWizard.vue'
 import { api, getData } from '@/api/http'
 import type { Command, CommandRequest, ControlSettings, CurvePoint, Policy } from '@/api/types'
+import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { fmt, LEVEL_TYPE, MODE_TEXT } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
 const rt = useRealtime()
+const auth = useAuth()
 const { snap, meta } = storeToRefs(rt)
 const id = computed(() => route.params.id as string)
 const d = computed(() => snap.value?.stations[id.value])
@@ -186,7 +193,7 @@ async function refresh() {
 watch(
   id,
   async (sid) => {
-    if (!sid?.startsWith('ST')) return
+    if (!sid?.startsWith('ST') || !rt.stationMeta[sid]) return   // 不在数据范围内：不发请求，显示空状态
     settings.value = null
     aiCurve.value = null
     aiSummary.value = ''

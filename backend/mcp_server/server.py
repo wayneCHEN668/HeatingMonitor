@@ -26,14 +26,18 @@ from typing_extensions import NotRequired, TypedDict
 from .client import ApiError, HeatnetAPI
 
 RISK_TEXT = {"R0": "R0 只读", "R1": "R1 计算", "R2": "R2 业务写入", "R3": "R3 控制下发"}
-PROFILES = {
-    # 调度智能体：唯一被授权使用 control_* 的智能体
-    "dispatch": {"data", "analyze", "predict", "optimize", "control"},
-    # 诊断 / 经营分析智能体：只读 + 计算，不能触碰调控
-    "analyst": {"data", "analyze", "predict", "optimize"},
+# 工具所需权限。实际可用工具 = 委托令牌的有效权限（智能体白名单 ∩ 用户权限）能覆盖的工具。
+TOOL_PERM = {
+    "data_search_objects": "monitor:read", "data_get_realtime": "monitor:read",
+    "data_get_timeseries_summary": "monitor:read", "data_get_alarms": "monitor:read", "data_get_weather": "monitor:read",
+    "analyze_anomaly_detect": "ai:read", "analyze_energy_benchmark": "analytics:read", "analyze_control_effect": "ai:read",
+    "predict_heat_load": "ai:read", "optimize_station_curve": "ai:read",
+    "control_get_autonomy_policy": "control:draft", "control_draft_command": "control:draft",
+    "control_safety_check": "control:draft", "control_request_approval": "control:draft",
+    "control_monitor_effect": "control:draft", "control_execute": "control:execute", "control_rollback": "control:execute",
 }
 
-INSTRUCTIONS = """你连接的是城市集中供热热网监控系统（3 个热源 HS01–HS03、13 个热力站 ST01–ST13）。
+INSTRUCTIONS = """你连接的是城市集中供热热网监控系统，只能看到并操作数据范围内的热源（HSxx）和热力站（STxx）。
 使用规则：
 1. 用户用名称、简称或地址指代对象时，先调用 data_search_objects 解析成标准 ID，其他工具只接受 ID。
 2. 回答中的数字必须来自工具返回，不要估算或编造；引用结论时说明依据（evidence）与告警（warnings）。
@@ -96,14 +100,17 @@ def _norm(text: str) -> str:
     return _STOP.sub("", t)
 
 
-def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "调度智能体",
-                 user: str = "调度员", audit: bool = True) -> MCPServer:
-    if profile not in PROFILES:
-        raise ValueError(f"未知 profile {profile}，可选 {list(PROFILES)}")
-    allowed = PROFILES[profile]
-    actor = f"{agent}（代 {user}）"
-    server = MCPServer(name="heatnet", title="热网监控系统", version="1.0.0",
-                       instructions=INSTRUCTIONS,
+def build_server(api: HeatnetAPI, *, audit: bool = True, client_label: str = "") -> MCPServer:
+    """身份、数据范围和可用工具都由委托令牌决定（启动时调用 /api/auth/me），不信任本地配置。"""
+    me = api.get("/api/auth/me")
+    if me["kind"] != "agent":
+        raise ValueError("MCP 服务须使用智能体委托令牌（在平台“智能体授权”页签发），不能使用人工登录令牌")
+    perms = set(me["permissions"])
+    scope = "全网" if me["scope"]["global"] else "、".join(me["scope"]["sources"]) + " 片区"
+    instructions = (INSTRUCTIONS + f"\n当前身份：{me['label']}（{me['profile']} 档案）；数据范围：{scope}。"
+                    + ("" if "control:draft" in perms else "\n你没有调控权限，不能草拟或下发任何指令。"))
+    server = MCPServer(name="heatnet", title="热网监控系统", version="1.1.0",
+                       instructions=instructions,
                        description="城市集中供热热网监控、分析、预测与调控工具集")
     meta_cache: dict[str, Any] = {}
 
@@ -114,16 +121,13 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
 
     def names() -> dict[str, str]:
         m = meta()
-        return {**{s["id"]: s["name"] for s in m["sources"]}, **{s["id"]: s["name"] for s in m["stations"]}, "NET": "全网"}
+        return {**{s["id"]: s["name"] for s in m["sources"]}, **{s["id"]: s["name"] for s in m["stations"]},
+                "NET": m["scope"]["name"]}
 
     def tool(name: str, risk: str, title: str, *, destructive: bool = False, idempotent: bool = True):
-        """注册工具：按 profile 过滤、加风险标注、统一异常处理与审计。"""
-        domain = name.split("_", 1)[0]
-        if domain == "sim":
-            domain = "predict"
-
+        """注册工具：按有效权限过滤、加风险标注、统一异常处理与审计。"""
         def deco(fn):
-            if domain not in allowed:
+            if TOOL_PERM[name] not in perms:
                 return fn
 
             @functools.wraps(fn)
@@ -139,7 +143,7 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
                 if audit:
                     try:
                         api.post("/api/audit/tool-calls", {
-                            "agent": agent, "user": user, "tool": name, "risk": risk,
+                            "tool": name, "risk": risk, "client": client_label,
                             "args": {k: v for k, v in kwargs.items() if k != "approval_token"},
                             "ok": res["ok"], "summary": res["summary"], "trace_id": res["trace_id"]})
                     except ApiError:
@@ -344,6 +348,20 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
                         f"三级 {counts['level3']}）" + (f"。{top}" if top else ""),
                         {"counts": counts, "alarms": out, "truncated": len(rows) > limit})
 
+    @tool("data_get_weather", "R0", "气象实况与预报")
+    def data_get_weather(
+        hours_ahead: Annotated[int, Field(ge=6, le=168, description="预报时长（小时）")] = 72,
+        include_hourly: Annotated[bool, Field(description="是否返回逐时预报（默认只返回逐日最低/最高）")] = False,
+    ) -> Envelope:
+        """室外气温实况、近 24 小时观测统计、逐日（可选逐时）预报，以及寒潮/较大降温预警。
+        用于判断是否需要预升温或安排调峰。不用于热负荷预测（用 predict_heat_load）。当前气象源只有气温。"""
+        e = api.get_env("/api/weather", hours=hours_ahead)
+        d = dict(e["data"])
+        if not include_hourly:
+            d.pop("forecast_hourly", None)
+        return envelope(e["summary"], d, warnings=e["warnings"], evidence=e["evidence"],
+                        data_ref=f"/api/weather?hours={hours_ahead}", trace_id=e["trace_id"])
+
     # ================================================================ 分析诊断 R1
     @tool("analyze_anomaly_detect", "R1", "运行异常检测")
     def analyze_anomaly_detect(
@@ -495,7 +513,7 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
         elif not (station_id and param and value is not None):
             raise ValueError("需要 plan_ref，或同时给出 station_id、param、value")
         r = api.post("/api/control/drafts", {"station_id": station_id.strip().upper(), "param": param, "value": value,
-                                             "user": actor, "reason": reason, "source": source})
+                                             "reason": reason, "source": source})
         d = r["data"]
         b, a = d["expected"]["before"], d["expected"]["after"]
         dh = (a["heat_mw"] - b["heat_mw"]) / max(b["heat_mw"], 0.01) * 100
@@ -536,7 +554,7 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
         approval_token，再用 control_execute 下发。重复调用同一 draft_id 会返回当前审批状态。"""
         did = draft_id.strip().upper()
         r = api.post(f"/api/control/drafts/{did}/request-approval",
-                     {"user": actor, "reason": reason, "timeout_s": timeout_minutes * 60})
+                     {"reason": reason, "timeout_s": timeout_minutes * 60})
         d = r["data"]
         deadline = time.monotonic() + wait_seconds
         while d["status"] == "pending_approval" and time.monotonic() < deadline:
@@ -565,7 +583,7 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
         """凭审批令牌把已通过安全校验的草案下发到现场，返回 command_id 和设备回执。无有效令牌（伪造、过期、已用、
         与草案不符）会被拒绝。下发后用 control_monitor_effect 跟踪。"""
         r = api.post(f"/api/control/drafts/{draft_id.strip().upper()}/execute",
-                     {"token": approval_token.strip(), "user": actor})
+                     {"token": approval_token.strip()})
         c = r["data"]
         return envelope(f"指令 {c['command_id']} 已下发：{c['station_name']} {c['description']}，设备回执 "
                         f"{c['ack']['latency_ms']}ms。下一步：control_monitor_effect",
@@ -598,7 +616,7 @@ def build_server(api: HeatnetAPI, *, profile: str = "dispatch", agent: str = "�
     ) -> Envelope:
         """把指令对应站点恢复到下发前的完整设定（模式、曲线、阀门、泵频率）。仅在效果明显偏离预期或用户要求时使用。"""
         c = api.post(f"/api/control/commands/{command_id.strip().upper()}/rollback",
-                     {"user": actor, "reason": reason})["data"]
+                     {"reason": reason})["data"]
         return envelope(f"指令 {c['command_id']} 已回滚，{c['station_name']} 恢复到下发前设定",
                         {"command_id": c["command_id"], "status": c["status"], "rollback": c.get("rollback")})
 

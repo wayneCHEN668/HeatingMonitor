@@ -198,21 +198,26 @@ class HistoryStore:
         self.sources = {k: pd.concat(v) for k, v in parts_src.items()}
 
     # ---------- 查询 ----------
-    def frame(self, object_id: str) -> pd.DataFrame:
+    def frame(self, object_id: str, sources: frozenset[str] | None = None) -> pd.DataFrame:
+        """sources 为数据范围（可见热源片区）；对 NET 而言即“当前用户可见范围内的汇总”。"""
         if object_id in self.stations:
             return self.stations[object_id]
         if object_id in self.sources:
             return self.sources[object_id]
         if object_id == "NET":
-            return self.network()
+            return self.network(sources)
         raise KeyError(object_id)
 
-    def network(self) -> pd.DataFrame:
-        srcs = list(self.sources.values())
+    def network(self, sources: frozenset[str] | None = None) -> pd.DataFrame:
+        from ..config import STATION_BY_ID
+        sids = [k for k in self.sources if sources is None or k in sources]
+        if not sids:
+            raise KeyError("NET")
+        srcs = [self.sources[k] for k in sids]
         base = srcs[0][["tout", "season"]].copy()
         for col in ("heat_mw", "heat_gj", "elec_kwh", "water_t", "gas_nm3", "steam_t", "cost_yuan", "g"):
             base[col] = sum(s[col] for s in srcs)
-        st = list(self.stations.values())
+        st = [df for k, df in self.stations.items() if STATION_BY_ID[k].source_id in sids]
         base["elec_kwh"] += sum(s["elec_kwh"] for s in st)
         base["water_t"] += sum(s["water_t"] for s in st)
         base["tin"] = sum(s["tin"] for s in st) / len(st)

@@ -18,12 +18,15 @@ class ApiError(Exception):
 class HeatnetAPI:
     """封装 /api/*。所有方法返回后端封套里的 data，或在失败时抛出 ApiError。"""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8000", client: httpx.Client | None = None, timeout: float = 60):
+    def __init__(self, base_url: str = "http://127.0.0.1:8000", token: str = "",
+                 client: httpx.Client | None = None, timeout: float = 60):
         self.http = client or httpx.Client(base_url=base_url, timeout=timeout)
+        self.token = token
 
     def _req(self, method: str, path: str, **kw) -> dict:
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         try:
-            r = self.http.request(method, path, **kw)
+            r = self.http.request(method, path, headers=headers, **kw)
         except httpx.TimeoutException as e:
             raise ApiError(f"后端响应超时：{e}", "TIMEOUT", retryable=True) from e
         except httpx.TransportError as e:
@@ -32,6 +35,10 @@ class HeatnetAPI:
             body = r.json()
         except ValueError as e:
             raise ApiError(f"后端返回非 JSON（HTTP {r.status_code}）", "BAD_RESPONSE", status=r.status_code) from e
+        if r.status_code == 401:
+            err = body.get("error") or {}
+            raise ApiError(f"委托令牌无效：{err.get('message', '未认证')}。请在平台“智能体授权”页重新签发",
+                           err.get("code", "UNAUTHENTICATED"), status=401)
         if r.status_code >= 400 or (isinstance(body, dict) and body.get("ok") is False):
             err = body.get("error") or {}
             msg = err.get("message") or body.get("summary") or body.get("detail") or f"HTTP {r.status_code}"

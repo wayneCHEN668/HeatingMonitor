@@ -10,6 +10,7 @@ export const menus = [
   { path: '/ai', title: 'AI 运行分析', icon: 'MagicStick', perm: ['ai:read'] },
   { path: '/commands', title: '调控与审计', icon: 'Operation', perm: ['control:draft', 'control:approve', 'audit:read'] },
   { path: '/alarms', title: '报警中心', icon: 'Bell', perm: ['monitor:read'] },
+  { path: '/kb', title: '知识库', icon: 'Reading', perm: ['kb:read'] },
   { path: '/agents', title: '智能体授权', icon: 'Key', perm: ['agent:delegate'] },
 ]
 
@@ -29,6 +30,7 @@ const router = createRouter({
     { path: '/ai', component: () => import('@/views/AiAnalysis.vue'), meta: { title: 'AI 运行分析' } },
     { path: '/commands', component: () => import('@/views/Commands.vue'), meta: { title: '调控与审计' } },
     { path: '/alarms', component: () => import('@/views/Alarms.vue'), meta: { title: '报警中心' } },
+    { path: '/kb', component: () => import('@/views/KnowledgeBase.vue'), meta: { title: '知识库' } },
     { path: '/agents', component: () => import('@/views/AgentTokens.vue'), meta: { title: '智能体授权' } },
     { path: '/forbidden', component: () => import('@/views/Forbidden.vue'), meta: { title: '无权访问' } },
   ],

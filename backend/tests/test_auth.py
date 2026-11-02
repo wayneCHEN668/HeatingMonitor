@@ -27,7 +27,7 @@ def login(tc, u, pw):
 
 
 def test_no_agent_profile_can_approve():
-    assert all("control:approve" not in perms for _, perms in AGENT_PROFILES.values())
+    assert all(not perms & {"control:approve", "kb:review", "kb:manage"} for _, perms in AGENT_PROFILES.values())
     assert "control:approve" not in ROLES["dispatcher"][1] and "control:approve" in ROLES["chief"][1]
 
 
@@ -118,7 +118,8 @@ def test_agent_tokens(tc):
     d = login(tc, "dispatcher", "disp123")
     r = tc.post("/api/auth/agent-tokens", headers=H(d), json={"agent": "调度智能体", "profile": "dispatch", "days": 500})
     rec = r.json()["data"]["record"]
-    assert rec["permissions"] == sorted({"monitor:read", "analytics:read", "ai:read", "control:draft", "control:execute"})
+    assert rec["permissions"] == sorted({"monitor:read", "analytics:read", "ai:read", "control:draft", "control:execute",
+                                         "kb:read", "kb:write"})
     agent = r.json()["data"]["token"]
     # 智能体不能再签发 / 管理委托令牌
     assert tc.post("/api/auth/agent-tokens", headers=H(agent), json={"profile": "analyst"}).status_code == 403

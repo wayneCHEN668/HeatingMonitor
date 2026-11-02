@@ -30,6 +30,7 @@ from .config import CURVE_TOUT, LIMITS, METRICS, SOURCE_BY_ID, SOURCES, STATION_
 from .services.ai import AIService
 from .services.analytics import Analytics, name_of
 from .services.control import ControlError, ControlService
+from .services.kb import KnowledgeBase
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
 from .sim.realtime import Engine
@@ -78,6 +79,7 @@ class State:
     analytics: Analytics
     ai: AIService
     auth: AuthService
+    kb: KnowledgeBase
     clients: dict[WebSocket, str]          # 连接 -> 令牌（每次推送前重新校验）
 
 
@@ -214,6 +216,7 @@ async def lifespan(app: FastAPI):
     S.analytics = Analytics(S.store)
     S.ai = AIService(S.store, S.engine)
     S.auth = AuthService()
+    S.kb = KnowledgeBase()
     S.clients = {}
     task = asyncio.create_task(ticker())
     threading.Thread(target=warmup, daemon=True).start()
@@ -605,6 +608,162 @@ def control_effect(sid: str, switch: str | None = None, p: Principal = Depends(n
 @app.get("/api/ai/diagnosis")
 def diagnosis(p: Principal = Depends(need("ai:read"))):
     return env(S.ai.diagnosis(p.sources))
+
+
+# ================================================================ 知识库
+class KbDocBody(BaseModel):
+    title: str = Field(min_length=2, max_length=60)
+    doc_type: str
+    content: str
+    version: str = ""
+
+
+class KbSimilarBody(BaseModel):
+    symptom: str = ""
+    object_type: str | None = None
+    alarm_codes: list[str] = []
+    features: list[str] = []
+    top_k: int = Field(3, ge=1, le=10)
+    include_pending: bool = False
+
+
+class KbCaseBody(BaseModel):
+    event_id: str | None = Field(None, description="报警 ID（如 ST07-MAKEUP）或指令号（CMD…），服务端解析为事件上下文")
+    object_id: str | None = None
+    title: str
+    symptom: str
+    cause: str = ""
+    steps: list[str]
+    outcome: str
+    alarm_codes: list[str] = []
+    features: list[str] = []
+    tags: list[str] = []
+
+
+class KbReviewBody(BaseModel):
+    approve: bool
+    comment: str = ""
+
+
+def _resolve_event(p: Principal, event_id: str | None, object_id: str | None) -> dict:
+    """把报警 ID / 指令号解析成事件上下文，并检查数据范围。"""
+    if event_id:
+        eid = event_id.strip()
+        if eid.upper().startswith("CMD"):
+            c = visible_command(p, eid)
+            return {"kind": "command", "event_id": c["command_id"], "object_id": c["station_id"],
+                    "object_name": c["station_name"], "description": c["description"],
+                    "occurred_at": c["executed_at"][:10], "alarm_codes": []}
+        a = S.engine.alarms.get(eid) or next((x for x in S.engine.alarm_log if x["id"] == eid), None)
+        if not a:
+            raise HTTPException(404, f"事件 {eid} 不存在（支持报警 ID 或指令号）")
+        see(p, a["object_id"])
+        return {"kind": "alarm", "event_id": a["id"], "object_id": a["object_id"], "object_name": a["object_name"],
+                "description": a["message"], "occurred_at": a["first_ts"][:10], "alarm_codes": [a["code"]]}
+    if object_id:
+        oid = see(p, object_id)
+        name = STATION_BY_ID[oid].name if oid in STATION_BY_ID else SOURCE_BY_ID[oid].name if oid in SOURCE_BY_ID else "全网"
+        return {"kind": "object", "event_id": None, "object_id": oid, "object_name": name, "alarm_codes": []}
+    return {"kind": "none", "event_id": None, "object_id": None, "object_name": "", "alarm_codes": []}
+
+
+def _case_visible(p: Principal, c: dict) -> bool:
+    """已审核案例全员可见（知识共享）；待审核/驳回的只对审核人和提交人可见。"""
+    return c["status"] == "approved" or p.has("kb:review") or c.get("submitted_by") == p.label
+
+
+@app.get("/api/kb/stats")
+def kb_stats(p: Principal = Depends(need("kb:read"))):
+    return env(S.kb.stats())
+
+
+@app.get("/api/kb/search")
+def kb_search(q: str, types: str = "", top_k: int = Query(5, ge=1, le=20), p: Principal = Depends(need("kb:read"))):
+    r = S.kb.search(q, [t for t in types.split(",") if t] or None, top_k)
+    warnings = ["部分片段含指令性文字，已标记；知识库内容仅供参考，不构成操作指令"] if any(x["flags"] for x in r["results"]) else []
+    return env(r, f"检索到 {len(r['results'])} 个相关片段", warnings=warnings)
+
+
+@app.get("/api/kb/docs")
+def kb_docs(p: Principal = Depends(need("kb:read"))):
+    return env(S.kb.list_docs())
+
+
+@app.get("/api/kb/docs/{doc_id}")
+def kb_doc(doc_id: str, p: Principal = Depends(need("kb:read"))):
+    return env(S.kb.get_doc(doc_id))
+
+
+@app.post("/api/kb/docs")
+def kb_upload(body: KbDocBody, p: Principal = Depends(need("kb:manage", human=True))):
+    d = S.kb.add_document(body.content, title=body.title, doc_type=body.doc_type, uploaded_by=p.label, version=body.version)
+    S.control._audit("kb_doc_upload", p.label, "-", {"doc_id": d["doc_id"], "title": d["title"], "flags": d["flags"]}, "ok")
+    warnings = [f"文档中检测到疑似提示注入文字：{'、'.join(d['flags'])}，相关片段已标记"] if d["flags"] else []
+    return env(d, f"已入库 {d['doc_id']}，切分为 {d['n_chunks']} 个片段", warnings=warnings)
+
+
+@app.delete("/api/kb/docs/{doc_id}")
+def kb_delete(doc_id: str, p: Principal = Depends(need("kb:manage", human=True))):
+    r = S.kb.delete_document(doc_id)
+    S.control._audit("kb_doc_delete", p.label, "-", {"doc_id": doc_id}, "ok")
+    return env(r, "已删除")
+
+
+@app.get("/api/kb/cases")
+def kb_cases(status: str = "", p: Principal = Depends(need("kb:read"))):
+    return env([c for c in S.kb.list_cases(status or None) if _case_visible(p, c)])
+
+
+@app.get("/api/kb/cases/{case_id}")
+def kb_case(case_id: str, p: Principal = Depends(need("kb:read"))):
+    c = S.kb.get_case(case_id)
+    if not _case_visible(p, c):
+        raise AuthError(403, "FORBIDDEN", "该案例尚未审核通过")
+    return env(c)
+
+
+@app.post("/api/kb/cases/similar")
+def kb_similar(body: KbSimilarBody, p: Principal = Depends(need("kb:read"))):
+    r = S.kb.similar_cases(body.symptom, object_type=body.object_type, alarm_codes=body.alarm_codes,
+                           features=body.features, top_k=body.top_k,
+                           include_pending=body.include_pending and p.has("kb:review"))
+    return env(r, f"找到 {len(r['cases'])} 个相似案例")
+
+
+@app.post("/api/kb/cases")
+def kb_save_case(body: KbCaseBody, p: Principal = Depends(need("kb:write"))):
+    ev = _resolve_event(p, body.event_id, body.object_id)
+    oid = ev["object_id"] or ""
+    otype = "station" if oid.startswith("ST") else "source" if oid.startswith("HS") else "network"
+    c = S.kb.save_case(title=body.title, symptom=body.symptom, cause=body.cause, steps=body.steps, outcome=body.outcome,
+                       object_type=otype, object_name=ev["object_name"],
+                       alarm_codes=sorted(set(body.alarm_codes) | set(ev["alarm_codes"])), features=body.features,
+                       tags=body.tags, event=ev if ev["kind"] != "none" else None, submitted_by=p.label)
+    S.control._audit("kb_case_submit", p.label, oid or "-", {"case_id": c["case_id"], "title": c["title"],
+                                                             "event_id": ev.get("event_id"), "flags": c["flags"]}, "pending")
+    warnings = [f"案例文本中检测到疑似提示注入文字：{'、'.join(c['flags'])}，审核时请重点核对"] if c["flags"] else []
+    return env(c, f"案例 {c['case_id']} 已提交，等待专家审核", warnings=warnings)
+
+
+@app.post("/api/kb/cases/{case_id}/review")
+def kb_review(case_id: str, body: KbReviewBody, p: Principal = Depends(need("kb:review", human=True))):
+    c = S.kb.review_case(case_id, body.approve, p.label, body.comment)
+    S.control._audit("kb_case_review", p.label, "-", {"case_id": case_id, "approve": body.approve,
+                                                      "comment": body.comment}, c["status"])
+    return env(c, "已审核通过，案例进入相似案例检索" if body.approve else "已驳回")
+
+
+@app.get("/api/kb/advice")
+def kb_advice(alarm_id: str, p: Principal = Depends(need("kb:read", "monitor:read"))):
+    """报警处置建议：相似历史案例 + 相关规程/手册章节。"""
+    ev = _resolve_event(p, alarm_id, None)
+    if ev["kind"] != "alarm":
+        raise ValueError("仅支持报警 ID")
+    otype = "station" if ev["object_id"].startswith("ST") else "source"
+    cases = S.kb.similar_cases(ev["description"], object_type=otype, alarm_codes=ev["alarm_codes"], top_k=3)
+    docs = S.kb.search(f"{ev['description']} {' '.join(ev['alarm_codes'])}", top_k=3)
+    return env({"event": ev, "cases": cases["cases"], "docs": docs["results"]},
+               f"{ev['object_name']}：{ev['description']}；找到 {len(cases['cases'])} 个相似案例、{len(docs['results'])} 个规程片段")
 
 
 @app.get("/api/health")

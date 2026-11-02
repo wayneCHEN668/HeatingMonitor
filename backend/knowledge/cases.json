@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "CASE-0001", "title": "一次回水温度传感器漂移导致热量计算偏小",
+    "object_type": "station", "object_name": "东湖二号站（上季）",
+    "symptom": "一次侧回水温度逐日升高约 5℃，一/二次侧热量偏差超过 15%，二次侧供回温度和室温正常",
+    "alarm_codes": ["HEAT_BAL"], "features": ["heat_balance", "dt1"],
+    "cause": "一次回水温度传感器（Pt100）接线端子氧化，测量值偏高",
+    "steps": ["用便携式测温仪比对一次回水管壁温度，确认传感器读数偏高约 5℃", "检查传感器接线，发现端子氧化", "更换传感器并重新校验热量表", "对比更换前后一/二次侧热量，偏差恢复到 3% 以内"],
+    "outcome": "更换后热量偏差 2.1%，热计量恢复正常", "handler": "王师傅（仪表班）", "occurred_at": "2025-12-08",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["传感器", "热计量"]
+  },
+  {
+    "case_id": "CASE-0002", "title": "二网主干管沟内泄漏",
+    "object_type": "station", "object_name": "北苑小区站（上季）",
+    "symptom": "补水量由 0.15t/h 阶跃增大到 1.5t/h，补水泵频繁启停，二次压力和温度基本正常",
+    "alarm_codes": ["MAKEUP"], "features": ["makeup"],
+    "cause": "小区 3 号楼与 5 号楼之间管沟内二次供水管焊口开裂",
+    "steps": ["查看补水泵启停记录和水箱液位，确认失水", "分区关断：依次关闭各楼栋入口阀，关闭 3-5 号楼支线后补水量回落", "维修班组下管沟巡查，发现焊口渗漏", "客服发布抢修通知，支线停热 4 小时完成补焊"],
+    "outcome": "补焊后补水量恢复到 0.12t/h", "handler": "刘班长（维修一班）", "occurred_at": "2026-01-15",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["泄漏", "失水"]
+  },
+  {
+    "case_id": "CASE-0003", "title": "远端站资用压差不足导致严寒期欠供",
+    "object_type": "station", "object_name": "北站家园站（上季）",
+    "symptom": "室外 -20℃ 以下时室温降到 17℃，调节阀开度长期 100%，二次供温低于设定 3℃",
+    "alarm_codes": ["UNDERSUPPLY", "TIN_LOW"], "features": ["valve", "tin"],
+    "cause": "位于管网末端，严寒期总流量增大后资用压差降到设计值的 40%",
+    "steps": ["核算一次侧供回水压差，仅为设计值 40%", "下调近端两个过流站曲线 2℃ 释放流量", "热源侧提高循环泵出口压力 0.05MPa", "观察 4 小时后远端站阀位降到 92%，供温达到设定"],
+    "outcome": "室温回升到 18.6℃；下季度计划增设管网加压泵", "handler": "张调度（调度中心）", "occurred_at": "2026-01-22",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["水力失衡", "近热远冷"]
+  },
+  {
+    "case_id": "CASE-0004", "title": "板式换热器结垢导致换热量下降",
+    "object_type": "station", "object_name": "文化路站（上季）",
+    "symptom": "同等负荷下一次回水温度逐日升高，端差由 2℃ 扩大到 8℃，二次供温达不到设定",
+    "alarm_codes": ["UNDERSUPPLY"], "features": ["dt1", "valve"],
+    "cause": "二次侧水质硬度超标，板片结垢",
+    "steps": ["对比投运初期端差和压降，二次侧压降增大 70%", "利用周末低负荷时段切换备用换热器", "对结垢换热器进行化学清洗", "加强补水软化设备再生管理"],
+    "outcome": "清洗后端差恢复到 2.5℃，供温达标", "handler": "赵师傅（设备班）", "occurred_at": "2026-02-10",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["结垢", "换热器"]
+  },
+  {
+    "case_id": "CASE-0005", "title": "电动调节阀卡涩，远程调节无响应",
+    "object_type": "station", "object_name": "望江苑站（上季）",
+    "symptom": "下发阀门开度指令后阀位反馈不变，二次供温不随指令变化",
+    "alarm_codes": [], "features": ["valve", "ts2_dev"],
+    "cause": "阀杆填料过紧加锈蚀，执行机构力矩不足",
+    "steps": ["小范围往复下发开度指令，确认阀位无响应", "到站切换手轮操作，在系统中设为手动阀位模式", "检修阀杆、调整填料并润滑", "恢复电动并校验阀位反馈"],
+    "outcome": "检修后阀位跟踪正常，恢复气候补偿", "handler": "孙师傅（设备班）", "occurred_at": "2025-12-20",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["调节阀", "执行机构"]
+  },
+  {
+    "case_id": "CASE-0006", "title": "补水泵故障导致二次回水压力低、循环泵汽蚀",
+    "object_type": "station", "object_name": "学府里站（上季）",
+    "symptom": "二次回水压力降到 0.17MPa，循环泵噪声增大、电流波动，部分楼栋顶层不热",
+    "alarm_codes": ["P2R_LOW"], "features": ["tin"],
+    "cause": "补水泵压力开关失灵，系统失压未自动补水",
+    "steps": ["手动启动补水泵恢复系统压力到 0.28MPa", "顶层用户散热器排气", "更换补水泵压力开关", "检查循环泵机械密封无损伤"],
+    "outcome": "压力恢复后顶层室温 2 小时内回升", "handler": "刘班长（维修一班）", "occurred_at": "2026-01-03",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["定压", "汽蚀"]
+  },
+  {
+    "case_id": "CASE-0007", "title": "曲线设定过高造成整站过量供热",
+    "object_type": "station", "object_name": "东湖一号站（上季）",
+    "symptom": "典型室温连续多日 22.5℃ 以上，修正单耗高于全网中位数，用户开窗",
+    "alarm_codes": ["TIN_HIGH"], "features": ["tin"],
+    "cause": "气候补偿曲线沿用设计值，未按建筑实际保温情况修正",
+    "steps": ["使用一站一策曲线优化计算推荐曲线，建议平均下调 4℃", "分两次下调，每次 2℃，间隔 24 小时", "跟踪室温回落到 20～21℃", "用调控效果评估确认净节能"],
+    "outcome": "室温降到 20.4℃，扣除天气后净节热约 9%", "handler": "张调度（调度中心）", "occurred_at": "2026-02-18",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["节能", "气候补偿"]
+  },
+  {
+    "case_id": "CASE-0008", "title": "站内通讯中断，远程调控失效",
+    "object_type": "station", "object_name": "绿城站（上季）",
+    "symptom": "站点数据每隔一段时间停止更新几分钟，远程指令下发失败",
+    "alarm_codes": ["COMM"], "features": [],
+    "cause": "站内 4G 路由器天线松动，信号间歇性丢失",
+    "steps": ["确认站点按本地控制器最后设定运行，供热未受影响", "到站检查通讯设备，紧固天线并更换馈线", "连续观察 24 小时无中断"],
+    "outcome": "通讯恢复稳定", "handler": "周工（自控班）", "occurred_at": "2025-11-28",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["通讯"]
+  },
+  {
+    "case_id": "CASE-0009", "title": "寒潮来临前预升温避免室温跌落",
+    "object_type": "network", "object_name": "全网",
+    "symptom": "气象预报 48 小时内最低气温下降 9℃，负荷预测 P90 接近热源装机容量",
+    "alarm_codes": ["OVERLOAD"], "features": [],
+    "cause": "寒潮",
+    "steps": ["提前 6 小时提高热源供水温度", "燃气调峰锅炉房提前热备一台锅炉", "各站保持气候补偿模式，暂停手动降温操作", "寒潮期间每 2 小时复核热源负荷率"],
+    "outcome": "寒潮期间全网室温达标率 97%", "handler": "李调度长（值班调度长）", "occurred_at": "2026-01-10",
+    "status": "approved", "reviewed_by": "运行主任", "tags": ["寒潮", "预升温", "调峰"]
+  },
+  {
+    "case_id": "CASE-0010", "title": "蓄热罐夜间蓄热不足导致白天电极锅炉高价时段运行",
+    "object_type": "source", "object_name": "南区热泵能源站（上季）",
+    "symptom": "白天蓄热量降到 5%，电极锅炉在峰电时段启动，运行成本升高",
+    "alarm_codes": ["TANK_LOW"], "features": [],
+    "cause": "夜间蓄热目标设定偏低，未考虑次日降温",
+    "steps": ["当日提高热泵出力，减少电极锅炉峰时运行", "当晚谷电时段把蓄热目标由 80% 提高到 100%", "结合次日负荷预测动态设定蓄热目标"],
+    "outcome": "次日峰时电极锅炉未启动，日电费下降约 18%", "handler": "陈工（热源管理部）", "occurred_at": "2026-01-25",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["蓄热", "峰谷电价"]
+  },
+  {
+    "case_id": "CASE-0011", "title": "燃气锅炉排烟温度升高、效率下降",
+    "object_type": "source", "object_name": "城北燃气调峰锅炉房（上季）",
+    "symptom": "同负荷下排烟温度比历史值高 18℃，燃气单耗上升",
+    "alarm_codes": [], "features": [],
+    "cause": "受热面结垢，过量空气系数偏大",
+    "steps": ["燃烧调整，降低过量空气系数", "停炉检查受热面，安排除垢", "调整台数调度，避免长期低负荷运行"],
+    "outcome": "排烟温度下降 15℃，效率回升约 2 个百分点", "handler": "马师傅（锅炉班）", "occurred_at": "2026-02-26",
+    "status": "approved", "reviewed_by": "运行主任", "tags": ["锅炉", "效率"]
+  },
+  {
+    "case_id": "CASE-0012", "title": "楼栋入口阀误关导致单楼不热",
+    "object_type": "station", "object_name": "锦绣花园站（上季）",
+    "symptom": "同一楼栋多户报不热，热力站典型室温正常，其他楼栋正常",
+    "alarm_codes": [], "features": ["tin"],
+    "cause": "楼栋入口回水阀检修后未完全打开",
+    "steps": ["客服判定为整楼问题转调度", "查看站内参数正常，排除站内原因", "到楼栋热力入口检查，发现回水阀仅开 20%", "全开阀门并排气"],
+    "outcome": "2 小时后该楼用户室温恢复", "handler": "刘班长（维修一班）", "occurred_at": "2025-12-12",
+    "status": "approved", "reviewed_by": "李调度长（值班调度长）", "tags": ["楼栋", "不热投诉"]
+  }
+]

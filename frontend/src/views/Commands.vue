@@ -65,7 +65,10 @@
               <template #default="{ row }"><el-tag size="small" :type="row.status === 'executed' ? 'success' : 'info'">{{ row.status === 'executed' ? '已执行' : '已回滚' }}</el-tag></template>
             </el-table-column>
             <el-table-column label="操作" width="90">
-              <template #default="{ row }"><el-button v-if="row.status === 'executed'" size="small" link type="danger" @click="rollback(row)">回滚</el-button></template>
+              <template #default="{ row }"><el-button v-if="row.status === 'executed' && auth.has('control:execute')" size="small" link type="danger" @click="rollback(row)">回滚</el-button></template>
+            </el-table-column>
+            <el-table-column v-if="auth.has('kb:write')" label="" width="96">
+              <template #default="{ row }"><el-button size="small" link @click="caseCmd = row; caseOpen = true">沉淀为案例</el-button></template>
             </el-table-column>
           </el-table>
         </div>
@@ -115,6 +118,8 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+    <CaseFormDialog v-model="caseOpen" :event-id="caseCmd?.command_id"
+                    :title="caseCmd ? `${caseCmd.station_name} ${caseCmd.param_text}调整` : ''" :symptom="caseCmd?.description" />
   </div>
 </template>
 
@@ -125,6 +130,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getData, postData } from '@/api/http'
 import type { Command, Draft } from '@/api/types'
 import { useAuth } from '@/stores/auth'
+import CaseFormDialog from '@/components/kb/CaseFormDialog.vue'
 import { useRealtime } from '@/stores/realtime'
 import { fmt } from '@/utils/format'
 
@@ -142,6 +148,8 @@ const pending = ref<Draft[]>([])
 const audit = ref<any[]>([])
 const comments = ref<Record<string, string>>({})
 const auditFilter = ref('')
+const caseOpen = ref(false)
+const caseCmd = ref<Command | null>(null)
 const auditRows = computed(() =>
   audit.value.filter((a) => !auditFilter.value || (auditFilter.value === 'tool_call' ? a.action === 'tool_call' : a.action !== 'tool_call')),
 )

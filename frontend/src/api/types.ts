@@ -287,3 +287,59 @@ export interface AgentTokenRecord {
   revoked_at?: string
   last_used: string | null
 }
+
+export interface KbResult {
+  chunk_id: string
+  doc_id: string
+  title: string
+  type: string
+  section: string
+  snippet: string
+  highlights: string[]
+  score: number
+  updated: string
+  version: string
+  sample: boolean
+  flags: string[]
+}
+
+export interface KbCase {
+  case_id: string
+  title: string
+  object_type: string
+  object_name: string
+  symptom: string
+  cause: string
+  steps: string[]
+  outcome: string
+  handler: string
+  occurred_at: string
+  status: 'approved' | 'pending_review' | 'rejected'
+  alarm_codes: string[]
+  features: string[]
+  tags: string[]
+  flags: string[]
+  score?: number
+  match_reasons?: string[]
+  submitted_by?: string
+  submitted_at?: string
+  reviewed_by?: string
+  review_comment?: string
+  event?: { kind: string; event_id: string | null; object_id: string | null; object_name: string; description?: string } | null
+}
+
+export interface KbDoc {
+  doc_id: string
+  title: string
+  type: string
+  version: string
+  updated: string
+  owner: string
+  sample: boolean
+  source: 'seed' | 'upload'
+  uploaded_by: string
+  n_chunks: number
+  sections: string[]
+  flags: string[]
+  body?: string
+}

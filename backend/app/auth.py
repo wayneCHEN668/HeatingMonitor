@@ -36,26 +36,32 @@ PERMISSIONS: dict[str, str] = {
     "control:approve": "批准或驳回调控请求（签发令牌）",
     "audit:read": "查看审计日志",
     "agent:delegate": "为智能体签发委托令牌",
+    "kb:read": "检索知识库（规程、手册、案例）",
+    "kb:write": "提交处置案例（待专家审核）",
+    "kb:review": "审核处置案例",
+    "kb:manage": "上传与删除知识库文档",
 }
 _ALL = frozenset(PERMISSIONS)
-_VIEW = {"monitor:read", "analytics:read", "ai:read"}
+_VIEW = {"monitor:read", "analytics:read", "ai:read", "kb:read"}
 
 ROLES: dict[str, tuple[str, frozenset[str]]] = {
     "admin": ("系统管理员", _ALL),
     "chief": ("值班调度长", frozenset(_VIEW | {"alarm:ack", "control:draft", "control:execute", "control:approve",
-                                              "audit:read", "agent:delegate"})),
-    "dispatcher": ("调度员", frozenset(_VIEW | {"alarm:ack", "control:draft", "control:execute", "agent:delegate"})),
+                                              "audit:read", "agent:delegate", "kb:write", "kb:review"})),
+    "dispatcher": ("调度员", frozenset(_VIEW | {"alarm:ack", "control:draft", "control:execute", "agent:delegate",
+                                            "kb:write"})),
     "manager": ("经营管理", frozenset(_VIEW | {"agent:delegate"})),
-    "stationmaster": ("片区站长", frozenset(_VIEW | {"alarm:ack", "agent:delegate"})),
-    "service": ("客服坐席", frozenset({"monitor:read", "agent:delegate"})),
+    "stationmaster": ("片区站长", frozenset(_VIEW | {"alarm:ack", "agent:delegate", "kb:write"})),
+    "service": ("客服坐席", frozenset({"monitor:read", "agent:delegate", "kb:read"})),
 }
 
 # 智能体档案白名单（设计文档第九节：只有调度智能体可以使用 control_*；任何智能体都不能批准）
 AGENT_PROFILES: dict[str, tuple[str, frozenset[str]]] = {
-    "dispatch": ("调度智能体", frozenset(_VIEW | {"control:draft", "control:execute"})),
+    "dispatch": ("调度智能体", frozenset(_VIEW | {"control:draft", "control:execute", "kb:write"})),
     "analyst": ("分析智能体", frozenset(_VIEW)),
 }
-assert all("control:approve" not in p for _, p in AGENT_PROFILES.values())
+# 任何智能体都不能批准调控、不能审核案例、不能管理知识库文档
+assert all(not p & {"control:approve", "kb:review", "kb:manage"} for _, p in AGENT_PROFILES.values())
 
 SESSION_TTL = 12 * 3600
 AGENT_TTL_MAX_DAYS = 90

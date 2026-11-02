@@ -15,6 +15,9 @@
         <el-table-column prop="message" label="报警内容" min-width="300" />
         <el-table-column label="首次发生" width="160"><template #default="{ row }">{{ row.first_ts.replace('T', ' ') }}</template></el-table-column>
         <el-table-column label="持续" width="90"><template #default="{ row }">{{ dur(row.first_ts) }}</template></el-table-column>
+        <el-table-column v-if="auth.has('kb:read')" label="知识库" width="96">
+          <template #default="{ row }"><el-button size="small" link type="success" @click="advice(row.id)">处置建议</el-button></template>
+        </el-table-column>
         <el-table-column label="确认" width="120">
           <template #default="{ row }">
             <span v-if="row.acked" class="muted">已确认</span>
@@ -32,8 +35,14 @@
         <el-table-column prop="message" label="内容" min-width="300" />
         <el-table-column label="发生" width="160"><template #default="{ row }">{{ row.first_ts.replace('T', ' ') }}</template></el-table-column>
         <el-table-column label="恢复" width="160"><template #default="{ row }">{{ row.cleared_ts?.replace('T', ' ') ?? (row.active ? '未恢复' : '') }}</template></el-table-column>
+        <el-table-column v-if="auth.has('kb:write')" label="" width="100">
+          <template #default="{ row }"><el-button size="small" link @click="saveCase(row)">沉淀为案例</el-button></template>
+        </el-table-column>
       </el-table>
     </div>
+    <KbAdviceDrawer v-model="adviceOpen" :alarm-id="adviceId" />
+    <CaseFormDialog v-model="caseOpen" :event-id="caseEvent?.id" :title="caseEvent ? `${caseEvent.object_name}：${caseEvent.message}` : ''"
+                    :symptom="caseEvent?.message" />
   </div>
 </template>
 
@@ -42,6 +51,8 @@ import { onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import KpiCard from '@/components/KpiCard.vue'
+import CaseFormDialog from '@/components/kb/CaseFormDialog.vue'
+import KbAdviceDrawer from '@/components/kb/KbAdviceDrawer.vue'
 import { getData, postData } from '@/api/http'
 import type { Alarm } from '@/api/types'
 import { useAuth } from '@/stores/auth'
@@ -52,6 +63,18 @@ const rt = useRealtime()
 const auth = useAuth()
 const { snap } = storeToRefs(rt)
 const hist = ref<Alarm[]>([])
+const adviceOpen = ref(false)
+const adviceId = ref<string | null>(null)
+const caseOpen = ref(false)
+const caseEvent = ref<Alarm | null>(null)
+function advice(id: string) {
+  adviceId.value = id
+  adviceOpen.value = true
+}
+function saveCase(a: Alarm) {
+  caseEvent.value = a
+  caseOpen.value = true
+}
 const count = (l: number) => snap.value!.alarms.filter((a) => a.level === l).length
 const link = (id: string) => (id.startsWith('HS') ? `/sources/${id}` : `/stations/${id}`)
 const dur = (ts: string) => {

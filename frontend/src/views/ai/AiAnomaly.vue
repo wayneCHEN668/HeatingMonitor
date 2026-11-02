@@ -12,7 +12,8 @@
             <span>{{ e.type }}</span>
           </div>
           <ul class="evid"><li v-for="x in e.evidence" :key="x">{{ x }}</li></ul>
-          <div class="adv">处置建议：{{ e.advice }}</div>
+          <div class="adv">处置建议：{{ e.advice }}
+            <el-button v-if="auth.has('kb:read') && !e.known_cause" size="small" link type="success" @click.stop="similar(e)">相似案例 →</el-button></div>
         </div>
       </div>
       <div class="panel">
@@ -29,6 +30,7 @@
         </div>
       </div>
     </div>
+    <KbAdviceDrawer v-model="kbOpen" :query="kbQuery" />
   </div>
 </template>
 
@@ -38,6 +40,8 @@ import { storeToRefs } from 'pinia'
 import type { EChartsOption } from 'echarts'
 import EChart from '@/components/EChart.vue'
 import EnvelopeInfo from './EnvelopeInfo.vue'
+import KbAdviceDrawer from '@/components/kb/KbAdviceDrawer.vue'
+import { useAuth } from '@/stores/auth'
 import { api, getData } from '@/api/http'
 import type { Envelope } from '@/api/types'
 import { useRealtime } from '@/stores/realtime'
@@ -49,6 +53,13 @@ const env = ref<Envelope<any> | null>(null)
 const d = computed(() => env.value?.data)
 const sel = ref(props.station)
 const series = ref<any>(null)
+const auth = useAuth()
+const kbOpen = ref(false)
+const kbQuery = ref<any>(null)
+function similar(e: any) {
+  kbQuery.value = { symptom: e.type, features: [e.feature], object_type: 'station', label: `${e.station_name} ${e.type}` }
+  kbOpen.value = true
+}
 const selName = computed(() => rt.stationMeta[sel.value]?.name ?? '')
 const selEvent = computed(() => d.value?.events.find((e: any) => e.station_id === sel.value))
 

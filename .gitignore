@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .venv/
 backend/data/
+backend/models/

@@ -1,7 +1,8 @@
 """知识库：规程/手册/制度/设备说明书检索、相似故障案例、案例沉淀与专家审核（设计文档第八节 kb_*）。
 
 检索：Markdown 按标题切成章节片段，中文按“单字 + 双字”切分建立 BM25 索引（不依赖分词库），
-      并用领域同义词表把现场说法（回温、跑水、不热……）扩展到规程用语（回水温度、泄漏、欠供……）。
+      并用领域同义词表把现场说法（回温、跑水、不热……）扩展到规程用语（回水温度、泄漏、欠供……）；
+      加载了中文向量模型（见 embedding.py）时，再做向量检索，两路排名用倒数排名融合（RRF）合并。
 案例：文本相似度（BM25，归一化）× 0.65 + 结构化匹配（报警代码、异常特征、对象类型）× 0.35。
 沉淀：新案例进入“待专家审核”，审核通过后才参与相似案例检索。
 护栏：知识库内容一律视为数据；上传文档与提交案例时检测提示注入式文字并标记（设计文档第十一节）。
@@ -21,12 +22,18 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import hashlib
+
+import numpy as np
+
 from ..sim.history import now_local
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 SEED_DIR = BACKEND_DIR / "knowledge"
 DOC_TYPES = ["规程", "手册", "制度", "设备说明书", "指南", "规范"]
 MIN_CASE_SCORE = 0.35   # 低于该分的相似案例不展示：弱匹配作为处置参考弊大于利
+RRF_K = 60              # 倒数排名融合常数（Cormack et al. 2009 的常用取值，不在本评测集上调参）
+VEC_CANDIDATES = 30     # 向量检索参与融合的候选数
 MAX_DOC_BYTES = 300_000
 
 # ---------------------------------------------------------------- 分词与同义词
@@ -221,14 +228,70 @@ class KBError(ValueError):
 
 # ---------------------------------------------------------------- 知识库
 class KnowledgeBase:
-    def __init__(self, data_dir: str | os.PathLike | None = None, seed_dir: Path = SEED_DIR):
+    def __init__(self, data_dir: str | os.PathLike | None = None, seed_dir: Path = SEED_DIR,
+                 embedder=None, embed_status: dict | None = None):
         self.seed_dir = Path(seed_dir)
         self.data_dir = Path(data_dir or os.environ.get("HEATNET_DATA_DIR") or BACKEND_DIR / "data")
         self.lock = threading.RLock()
         self.docs: dict[str, dict] = {}
         self.chunks: list[Chunk] = []
         self.cases: list[dict] = []
+        self.embedder = embedder
+        self.embed_status = embed_status or {"enabled": embedder is not None, "reason": "" if embedder else "未配置向量模型"}
+        self.chunk_vecs: np.ndarray | None = None
+        self.case_vecs: np.ndarray | None = None
+        self._vec_cache: dict[str, np.ndarray] | None = None
         self._load()
+
+    # ---------- 向量 ----------
+    def attach_embedder(self, embedder, status: dict):
+        """后台加载完成后挂接向量模型（首次下载模型可能较慢，不阻塞服务启动）。"""
+        with self.lock:
+            self.embedder, self.embed_status = embedder, dict(status)
+            self._vec_cache = None
+            try:
+                self._embed_all()
+            except Exception as e:  # noqa: BLE001
+                self.embedder, self.chunk_vecs, self.case_vecs = None, None, None
+                self.embed_status = {**self.embed_status, "enabled": False, "reason": f"向量化失败：{e}"}
+
+    def _vec_cache_path(self) -> Path:
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", getattr(self.embedder, "name", "model"))
+        return self.data_dir / "kb_vectors" / f"{slug}.npz"
+
+    def _embed_texts(self, texts: list[str]) -> np.ndarray:
+        """带磁盘缓存的批量向量化：键为 sha1(模型名 + 文本)，文本不变就不重复计算。"""
+        if self._vec_cache is None:
+            self._vec_cache = {}
+            path = self._vec_cache_path()
+            if path.exists():
+                with np.load(path) as z:
+                    self._vec_cache = dict(zip(z["keys"].tolist(), z["vecs"]))
+        name = self.embedder.name
+        keys = [hashlib.sha1(f"{name}\n{t}".encode()).hexdigest() for t in texts]
+        missing = sorted({k: t for k, t in zip(keys, texts) if k not in self._vec_cache}.items())
+        if missing:
+            vecs = self.embedder.embed_docs([t for _, t in missing])
+            for (k, _), v in zip(missing, vecs):
+                self._vec_cache[k] = v
+            path = self._vec_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp.npz")
+            np.savez(tmp, keys=np.array(list(self._vec_cache)), vecs=np.stack(list(self._vec_cache.values())))
+            os.replace(tmp, path)
+        return np.stack([self._vec_cache[k] for k in keys]) if keys else None
+
+    def _embed_all(self):
+        if self.embedder is None:
+            self.chunk_vecs = self.case_vecs = None
+            return
+        self.chunk_vecs = self._embed_texts([f"{self.docs[c.doc_id]['title']}｜{c.section}｜{c.text}" for c in self.chunks])
+        self.case_vecs = self._embed_texts([f"{c['title']}。{c['symptom']}。{c.get('cause', '')}" for c in self.cases])
+        self.embed_status["vectors"] = len(self.chunks) + len(self.cases)
+
+    @property
+    def mode(self) -> str:
+        return "hybrid" if self.chunk_vecs is not None else "bm25"
 
     # ---------- 加载 ----------
     def _load(self):
@@ -270,31 +333,59 @@ class KnowledgeBase:
         self.chunk_index = BM25([tokenize(doc_text(c)) for c in self.chunks])
         self.case_index = BM25([tokenize(f"{c['title']} {c['symptom']} {c['symptom']} {c.get('cause', '')} "
                                          f"{' '.join(c.get('tags', []))}") for c in self.cases])
+        if self.embedder is not None:
+            self._embed_all()
 
     # ---------- 检索 ----------
-    def search(self, query: str, doc_types: list[str] | None = None, top_k: int = 5, use_synonyms: bool = True) -> dict:
+    def search(self, query: str, doc_types: list[str] | None = None, top_k: int = 5, use_synonyms: bool = True,
+               mode: str | None = None) -> dict:
+        """mode：bm25（关键词）| vector（向量）| hybrid（两路 RRF 融合）；默认有向量用 hybrid，否则 bm25。"""
         query = (query or "").strip()
         if not query:
             raise KBError("检索词不能为空")
         q = expand(query) if use_synonyms else [(t, 1.0) for t in tokenize(query)]
         with self.lock:
-            scores = self.chunk_index.scores(q)
-            ranked = sorted(range(len(self.chunks)), key=lambda i: -scores[i])
+            mode = mode or self.mode
+            if mode in ("vector", "hybrid") and self.chunk_vecs is None:
+                raise KBError(f"向量模型未加载，不能使用 {mode} 检索：{self.embed_status.get('reason', '')}")
+            bm_rank: dict[int, int] = {}
+            if mode != "vector":
+                scores = self.chunk_index.scores(q)
+                order = [i for i in sorted(range(len(self.chunks)), key=lambda i: -scores[i]) if scores[i] > 0]
+                bm_rank = {i: r + 1 for r, i in enumerate(order)}
+            vec_rank: dict[int, int] = {}
+            sims = None
+            if mode != "bm25":
+                sims = self.chunk_vecs @ self.embedder.embed_query(query)
+                vorder = np.argsort(-sims)[:VEC_CANDIDATES]
+                vec_rank = {int(i): r + 1 for r, i in enumerate(vorder)}
+            if mode == "bm25":
+                fused = {i: 1 / r for i, r in bm_rank.items()}
+            elif mode == "vector":
+                fused = {i: float(sims[i]) for i in vec_rank}
+            else:
+                fused = {}
+                for ranks in (bm_rank, vec_rank):
+                    for i, r in ranks.items():
+                        fused[i] = fused.get(i, 0.0) + 1 / (RRF_K + r)
             results = []
-            for i in ranked:
-                if scores[i] <= 0 or len(results) >= top_k:
+            for i in sorted(fused, key=lambda i: -fused[i]):
+                if len(results) >= top_k:
                     break
                 c = self.chunks[i]
                 d = self.docs[c.doc_id]
                 if doc_types and d["type"] not in doc_types:
                     continue
                 snippet, hl = self._snippet(c.text, q)
+                src = "关键词+语义" if i in bm_rank and i in vec_rank else ("语义" if i in vec_rank else "关键词")
                 results.append({"chunk_id": c.chunk_id, "doc_id": c.doc_id, "title": d["title"], "type": d["type"],
                                 "section": c.section, "snippet": snippet, "highlights": hl,
-                                "score": round(scores[i], 3), "updated": d["updated"], "version": d["version"],
-                                "sample": d["sample"], "flags": c.flags})
-        expanded = expand_phrases(query) if use_synonyms else []
-        return {"query": query, "results": results, "expanded_terms": expanded[:12], "total_chunks": len(self.chunks)}
+                                "score": round(fused[i], 4), "match": src, "bm25_rank": bm_rank.get(i),
+                                "vec_rank": vec_rank.get(i), "vec_sim": round(float(sims[i]), 3) if sims is not None else None,
+                                "updated": d["updated"], "version": d["version"], "sample": d["sample"], "flags": c.flags})
+        expanded = expand_phrases(query) if use_synonyms and mode != "vector" else []
+        return {"query": query, "mode": mode, "results": results, "expanded_terms": expanded[:12],
+                "total_chunks": len(self.chunks)}
 
     @staticmethod
     def _snippet(text: str, q: list[tuple[str, float]], width: int = 160) -> tuple[str, list[str]]:
@@ -342,6 +433,9 @@ class KnowledgeBase:
         today = now_local().strftime("%Y-%m-%d")
         raw = (f"---\nid: {doc_id}\ntitle: {title}\ntype: {doc_type}\nversion: {version}\nupdated: {today}\n"
                f"owner: \nuploaded_by: {uploaded_by}\nsample: false\n---\n{body}\n")
+        _, probe = chunk_markdown(doc_id, body)
+        if not probe:
+            raise KBError("文档没有可检索的正文：请在标题行（## …）下面另起一行写正文")
         with self.lock:
             _atomic_write(self.data_dir / "kb_docs" / f"{doc_id}.md", raw)
             doc = self._add_doc_text(raw, source="upload")
@@ -368,8 +462,12 @@ class KnowledgeBase:
         with self.lock:
             text_scores = self.case_index.scores(expand(symptom)) if symptom else [0.0] * len(self.cases)
             mx = max(text_scores) if text_scores and max(text_scores) > 0 else 1.0
+            vsims = None
+            if symptom and self.case_vecs is not None:
+                vsims = np.clip(self.case_vecs @ self.embedder.embed_query(symptom), 0, None)
+                vmx = float(vsims.max()) or 1.0
             out = []
-            for c, ts in zip(self.cases, text_scores):
+            for ci, (c, ts) in enumerate(zip(self.cases, text_scores)):
                 if c["status"] != "approved" and not (include_pending and c["status"] == "pending_review"):
                     continue
                 cc, cf = set(c.get("alarm_codes", [])), set(c.get("features", []))
@@ -383,6 +481,8 @@ class KnowledgeBase:
                     parts.append((0.2, 1.0 if c.get("object_type") == object_type else 0.0))
                 struct = sum(w * v for w, v in parts) / sum(w for w, _ in parts) if parts else None
                 text = ts / mx if symptom else None
+                if text is not None and vsims is not None:
+                    text = 0.5 * text + 0.5 * float(vsims[ci]) / vmx      # 关键词与语义各半
                 # 只按查询实际提供的信号加权：都有时 文本 0.65 + 结构化 0.35
                 if text is not None and struct is not None:
                     score = 0.65 * text + 0.35 * struct
@@ -392,7 +492,7 @@ class KnowledgeBase:
                 ot = 1.0 if object_type and c.get("object_type") == object_type else 0.0
                 reasons = []
                 if text > 0.3:
-                    reasons.append(f"症状描述相似度 {text:.2f}")
+                    reasons.append(f"症状描述相似度 {text:.2f}" + ("（关键词+语义）" if vsims is not None else ""))
                 if codes & cc:
                     reasons.append("报警代码相同：" + "、".join(sorted(codes & cc)))
                 if feats & cf:
@@ -406,7 +506,7 @@ class KnowledgeBase:
                                        "tags", "flags") if k in c},
                 "score": round(s, 3), "match_reasons": r}
                for s, r, c in out[:top_k] if s >= MIN_CASE_SCORE]
-        return {"cases": res, "searched": len(out)}
+        return {"cases": res, "searched": len(out), "mode": "hybrid" if vsims is not None else "bm25"}
 
     def list_cases(self, status: str | None = None) -> list[dict]:
         rows = [c for c in self.cases if status in (None, "", c["status"])]
@@ -465,16 +565,17 @@ class KnowledgeBase:
     def stats(self) -> dict:
         st = Counter(c["status"] for c in self.cases)
         return {"docs": len(self.docs), "chunks": len(self.chunks), "cases_approved": st.get("approved", 0),
-                "cases_pending": st.get("pending_review", 0), "doc_types": DOC_TYPES}
+                "cases_pending": st.get("pending_review", 0), "doc_types": DOC_TYPES,
+                "retrieval": {"mode": self.mode, **{k: v for k, v in self.embed_status.items()}}}
 
     # ---------- 评测 ----------
-    def evaluate(self, queries: list[dict], use_synonyms: bool = True, k: int = 3) -> dict:
+    def evaluate(self, queries: list[dict], use_synonyms: bool = True, k: int = 3, mode: str | None = None) -> dict:
         hit1 = hitk = 0
         rr = 0.0
         rows = []
         for item in queries:
             gold = [(item["doc"], item["section"])] + [tuple(a) for a in item.get("alt", [])]
-            res = self.search(item["q"], top_k=10, use_synonyms=use_synonyms)["results"]
+            res = self.search(item["q"], top_k=10, use_synonyms=use_synonyms, mode=mode)["results"]
             rank = next((i + 1 for i, r in enumerate(res) if any(r["doc_id"] == d and s in r["section"] for d, s in gold)), None)
             hit1 += rank == 1
             hitk += rank is not None and rank <= k

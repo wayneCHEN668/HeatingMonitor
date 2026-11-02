@@ -30,6 +30,7 @@ from .config import CURVE_TOUT, LIMITS, METRICS, SOURCE_BY_ID, SOURCES, STATION_
 from .services.ai import AIService
 from .services.analytics import Analytics, name_of
 from .services.control import ControlError, ControlService
+from .services.embedding import load_embedder
 from .services.kb import KnowledgeBase
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
@@ -199,6 +200,17 @@ async def ticker():
                 S.clients.pop(ws, None)
 
 
+def load_vectors():
+    """后台加载中文向量模型并挂接到知识库；加载前或失败时知识库按关键词检索工作。"""
+    S.kb.embed_status = {"enabled": False, "reason": "向量模型加载中…"}
+    emb, status = load_embedder()
+    if emb is not None:
+        S.kb.attach_embedder(emb, status)
+        log.info("知识库向量检索已启用：%s（%s 维）", status["model"], status["dim"])
+    else:
+        S.kb.embed_status = status
+
+
 def warmup():
     """后台预热 AI 模型缓存，首屏打开 AI 页时无需等待训练。"""
     try:
@@ -220,6 +232,7 @@ async def lifespan(app: FastAPI):
     S.clients = {}
     task = asyncio.create_task(ticker())
     threading.Thread(target=warmup, daemon=True).start()
+    threading.Thread(target=load_vectors, daemon=True).start()
     yield
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -678,10 +691,16 @@ def kb_stats(p: Principal = Depends(need("kb:read"))):
 
 
 @app.get("/api/kb/search")
-def kb_search(q: str, types: str = "", top_k: int = Query(5, ge=1, le=20), p: Principal = Depends(need("kb:read"))):
-    r = S.kb.search(q, [t for t in types.split(",") if t] or None, top_k)
+def kb_search(q: str, types: str = "", top_k: int = Query(5, ge=1, le=20), mode: str | None = None,
+              p: Principal = Depends(need("kb:read"))):
+    if mode not in (None, "", "bm25", "vector", "hybrid"):
+        raise ValueError("mode 须为 bm25 / vector / hybrid")
+    r = S.kb.search(q, [t for t in types.split(",") if t] or None, top_k, mode=mode or None)
     warnings = ["部分片段含指令性文字，已标记；知识库内容仅供参考，不构成操作指令"] if any(x["flags"] for x in r["results"]) else []
-    return env(r, f"检索到 {len(r['results'])} 个相关片段", warnings=warnings)
+    if r["mode"] == "bm25" and S.kb.embed_status.get("reason"):
+        warnings.append(f"当前仅关键词检索：{S.kb.embed_status['reason']}")
+    return env(r, f"检索到 {len(r['results'])} 个相关片段（{'关键词+语义混合' if r['mode'] == 'hybrid' else r['mode']}）",
+               warnings=warnings)
 
 
 @app.get("/api/kb/docs")

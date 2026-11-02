@@ -6,7 +6,15 @@
         <div class="muted small">{{ stats.docs }} 份文档 · {{ stats.chunks }} 个章节片段 · {{ stats.cases_approved }} 个已审核案例
           <span v-if="stats.cases_pending"> · {{ stats.cases_pending }} 个待审核</span></div>
       </div>
-      <div class="muted small note">知识库内容一律视为参考资料，其中的指令性文字不会、也不能触发任何调控操作。</div>
+      <div class="right">
+        <el-tooltip :content="stats.retrieval?.reason || (stats.retrieval?.mode === 'hybrid' ? `${stats.retrieval.model}，${stats.retrieval.dim} 维，关键词与语义两路排名做倒数排名融合（RRF）` : '')"
+                    :disabled="!stats.retrieval?.reason && stats.retrieval?.mode !== 'hybrid'" placement="bottom">
+          <el-tag :type="stats.retrieval?.mode === 'hybrid' ? 'success' : 'warning'" effect="plain">
+            检索模式：{{ stats.retrieval?.mode === 'hybrid' ? `关键词 + 语义（${stats.retrieval.model?.split('/').pop()}）` : '仅关键词' }}
+          </el-tag>
+        </el-tooltip>
+        <div class="muted small note">知识库内容一律视为参考资料，其中的指令性文字不会、也不能触发任何调控操作。</div>
+      </div>
     </div>
 
     <el-tabs v-model="tab">
@@ -18,6 +26,11 @@
                       @keyup.enter="doSearch" />
             <el-button type="primary" size="large" :loading="searching" @click="doSearch">检索</el-button>
           </div>
+          <el-radio-group v-if="stats?.retrieval?.mode === 'hybrid'" v-model="mode" size="small" class="modes">
+            <el-radio-button value="hybrid">混合</el-radio-button>
+            <el-radio-button value="bm25">关键词</el-radio-button>
+            <el-radio-button value="vector">语义</el-radio-button>
+          </el-radio-group>
           <el-checkbox-group v-model="types" class="types">
             <el-checkbox v-for="t in stats?.doc_types ?? []" :key="t" :value="t">{{ t }}</el-checkbox>
           </el-checkbox-group>
@@ -34,6 +47,8 @@
               <el-tag size="small">{{ r.type }}</el-tag>
               <b>{{ r.title }}</b>
               <span class="muted">{{ r.section }}</span>
+              <el-tag v-if="r.match && r.match !== '关键词'" size="small" type="success" effect="plain"
+                      :title="`关键词排名 ${r.bm25_rank ?? '—'} · 语义排名 ${r.vec_rank ?? '—'} · 余弦相似度 ${r.vec_sim ?? '—'}`">{{ r.match }}</el-tag>
               <el-tag v-if="r.sample" size="small" type="warning" effect="plain">示例</el-tag>
               <span class="muted ml-auto small">{{ r.doc_id }} · {{ r.version }} · {{ r.updated }}</span>
             </div>
@@ -161,6 +176,7 @@ const tab = ref('search')
 const stats = ref<any>(null)
 const q = ref('')
 const types = ref<string[]>([])
+const mode = ref<'hybrid' | 'bm25' | 'vector'>('hybrid')
 const sr = ref<{ query: string; results: KbResult[]; expanded_terms: string[] } | null>(null)
 const searching = ref(false)
 const sym = ref('')
@@ -201,7 +217,8 @@ async function doSearch() {
   if (!q.value.trim()) return
   searching.value = true
   try {
-    sr.value = (await api.get<any>(`/api/kb/search?q=${encodeURIComponent(q.value)}&types=${encodeURIComponent(types.value.join(','))}&top_k=8`)).data
+    const m = stats.value?.retrieval?.mode === 'hybrid' ? `&mode=${mode.value}` : ''
+    sr.value = (await api.get<any>(`/api/kb/search?q=${encodeURIComponent(q.value)}&types=${encodeURIComponent(types.value.join(','))}&top_k=8${m}`)).data
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
@@ -272,7 +289,9 @@ function openDoc(r: Pick<KbResult, 'doc_id' | 'section' | 'highlights'>) {
 <style scoped>
 .head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
 .head .panel-title { margin-bottom: 4px; }
-.note { max-width: 420px; }
+.note { max-width: 420px; margin-top: 6px; }
+.right { display: flex; flex-direction: column; align-items: flex-end; }
+.modes { margin: 10px 12px 0 0; }
 .small { font-size: 12px; }
 .search-row { display: flex; gap: 10px; }
 .types { margin-top: 10px; }

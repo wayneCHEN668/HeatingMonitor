@@ -301,6 +301,10 @@ export interface KbResult {
   version: string
   sample: boolean
   flags: string[]
+  match?: '关键词' | '语义' | '关键词+语义'
+  bm25_rank?: number | null
+  vec_rank?: number | null
+  vec_sim?: number | null
 }
 
 export interface KbCase {

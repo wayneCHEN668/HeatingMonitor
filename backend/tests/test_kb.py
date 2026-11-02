@@ -90,6 +90,8 @@ def test_case_lifecycle_and_persistence():
     assert doc["doc_id"] in kb2.docs and kb2.search("停泵顺序")["results"][0]["doc_id"] == doc["doc_id"]
     with pytest.raises(KBError):
         kb2.delete_document("SOP-01")                                       # 种子文档不可在线删除
+    with pytest.raises(KBError, match="没有可检索的正文"):
+        kb2.add_document("## 只有一行标题而没有正文内容的上传文档示例", title="空文档", doc_type="指南", uploaded_by="u")
 
 
 # ---------------------------------------------------------------- API 权限
@@ -155,6 +157,7 @@ def test_mcp_kb_loop(tc):
 
     srch, sim, saved = run(part1)
     assert srch["ok"] and srch["data"]["results"][0]["doc_id"] == "MAN-01" and srch["data"]["content_is_data"]
+    assert srch["data"]["retrieval_mode"] == "bm25" and "关键词检索" in srch["summary"]   # 测试环境未加载向量模型
     assert sim["data"]["cases"][0]["case_id"] == "CASE-0002" and sim["evidence"]
     assert saved["ok"] and saved["data"]["status"] == "pending_review" and saved["data"]["alarm_codes"] == ["MAKEUP"]
     cid = state["case_id"]

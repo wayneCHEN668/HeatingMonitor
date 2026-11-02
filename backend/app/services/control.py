@@ -46,6 +46,30 @@ class ControlService:
         self.commands: dict[str, dict] = {}
         self.audit: list[dict] = []
         self.used_tokens: set[str] = set()
+        self.breaker = None          # CircuitBreaker，由 main 注入；熔断时有效自治等级降为 L1
+
+    # ---------------- 熔断联动 ----------------
+    def effective_autonomy(self, station_id: str) -> str:
+        return self.breaker.effective_autonomy(station_id) if self.breaker else STATION_BY_ID[station_id].autonomy
+
+    def on_breaker_trip(self, network_id: str, reasons: list[str]):
+        """熔断时：作废该管网已签发未执行的令牌，取消智能体发起的待审批请求。人工请求保留，由人决定。"""
+        revoked, cancelled = [], []
+        for d in self.drafts.values():
+            if STATION_BY_ID[d["station_id"]].source_id != network_id:
+                continue
+            if d["status"] == "approved":
+                d["status"] = "revoked"
+                d["revoked_reason"] = "管网熔断，令牌作废：" + "；".join(reasons)
+                if d.get("approval", {}).get("token"):
+                    self.used_tokens.add(d["approval"]["token"])
+                revoked.append(d["draft_id"])
+            elif d["status"] == "pending_approval" and d.get("actor_kind") == "agent":
+                d["status"] = "cancelled"
+                d["approval_request"]["resolved"] = "cancelled_by_breaker"
+                cancelled.append(d["draft_id"])
+        self._audit("breaker_trip", "安全网关（熔断）", network_id,
+                    {"reasons": reasons, "revoked_tokens": revoked, "cancelled_requests": cancelled}, "tripped")
 
     # ---------------- 审计 ----------------
     def record_tool_call(self, agent: str, user: str, tool: str, args: dict, ok: bool, summary: str,
@@ -67,8 +91,11 @@ class ControlService:
         cfg = self._cfg(station_id)
         lim = LIMITS
         return {
-            "station_id": station_id, "autonomy": cfg.autonomy,
-            "auto_sign": cfg.autonomy in ("L3", "L4"),
+            "station_id": station_id, "autonomy": self.effective_autonomy(station_id),
+            "configured_autonomy": cfg.autonomy,
+            "auto_sign": self.effective_autonomy(station_id) in ("L3", "L4"),
+            "breaker": ({"state": "tripped", "reasons": self.breaker.nets[cfg.source_id].reasons}
+                        if self.breaker and self.breaker.is_tripped(station_id) else {"state": "normal", "reasons": []}),
             "params": {
                 "valve_opening": {"min": lim["valve"][0], "max": lim["valve"][1], "max_step": lim["valve_step"], "unit": "%"},
                 "supply_temp_setpoint": {"min": lim[cfg.system]["ts2"][0], "max": lim[cfg.system]["ts2"][1],
@@ -98,7 +125,7 @@ class ControlService:
 
     # ---------------- 1. 草拟 ----------------
     def draft(self, station_id: str, param: str, value, user: str, reason: str = "", source: str = "manual",
-              owner: str = "") -> dict:
+              owner: str = "", actor_kind: str = "human") -> dict:
         self._cfg(station_id)
         if param not in PARAM_TEXT:
             raise ControlError("BAD_PARAM", f"不支持的参数 {param}")
@@ -139,7 +166,7 @@ class ControlService:
             "draft_id": "DR" + uuid.uuid4().hex[:8].upper(), "station_id": station_id,
             "station_name": STATION_BY_ID[station_id].name, "param": param, "param_text": PARAM_TEXT[param],
             "value": value, "override": override, "before": cur, "description": desc, "reason": reason,
-            "source": source, "created_by": user, "owner": owner, "created_at": now_local().isoformat(timespec="seconds"),
+            "source": source, "created_by": user, "owner": owner, "actor_kind": actor_kind, "created_at": now_local().isoformat(timespec="seconds"),
             "status": "drafted", "expected": {"before": before, "after": after},
             "check": None, "approval": None,
         }
@@ -226,7 +253,7 @@ class ControlService:
         d["status"] = "checked" if verdict != "block" else "blocked"
         self._audit("safety_check", user, d["station_id"], {"draft_id": draft_id, "verdict": verdict}, verdict)
         # L3/L4：安全边界内自动签发
-        if verdict == "pass" and cfg.autonomy in ("L3", "L4"):
+        if verdict == "pass" and self.effective_autonomy(d["station_id"]) in ("L3", "L4"):
             self._sign(d, "安全网关(自动)", "L3 站点安全边界内自动签发")
         return d
 
@@ -338,6 +365,9 @@ class ControlService:
     # ---------------- 4. 下发 ----------------
     def execute(self, draft_id: str, token: str, user: str) -> dict:
         d = self._draft(draft_id)
+        if d["status"] == "revoked":
+            self._audit("execute", user, d["station_id"], {"draft_id": draft_id}, "rejected: revoked")
+            raise ControlError("TOKEN_REVOKED", d.get("revoked_reason", "令牌已作废"))
         ok, why = self._verify(token or "", draft_id)
         if not ok:
             self._audit("execute", user, d["station_id"], {"draft_id": draft_id}, f"rejected: {why}")
@@ -403,6 +433,8 @@ class ControlService:
         c["status"] = "rolled_back"
         c["rollback"] = {"by": user, "reason": reason, "ts": now_local().isoformat(timespec="seconds")}
         self._audit("rollback", user, c["station_id"], {"command_id": command_id, "reason": reason}, "ok")
+        if self.breaker:
+            self.breaker.record_rollback(c["station_id"], command_id)     # 回滚计入熔断统计，可能触发熔断
         return c
 
     # ---------------- 查询 ----------------

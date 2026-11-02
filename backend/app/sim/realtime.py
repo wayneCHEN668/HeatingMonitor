@@ -67,6 +67,8 @@ class Engine:
         self.alarms: dict[str, dict] = {}
         self.alarm_log: list[dict] = []
         self.snapshot: dict = {}
+        # 外部报警来源（如熔断）：返回 [(级别, 代码, 对象 ID, 对象名, 内容)]
+        self.alarm_hooks: list = []
         self.tick(0.0)
 
     # ------------------------------------------------------------------
@@ -396,6 +398,11 @@ class Engine:
                 key = f"{hid}-TANK_LOW"
                 seen.add(key)
                 self._raise(key, hid, r["name"], 3, "TANK_LOW", "蓄热罐蓄热量低", r["tank_soc"])
+        for hook in self.alarm_hooks:
+            for level, code, oid, name, msg in hook():
+                key = f"{oid}-{code}"
+                seen.add(key)
+                self._raise(key, oid, name, level, code, msg, None)
         for key in list(self.alarms):
             if key not in seen:
                 a = self.alarms.pop(key)

@@ -161,6 +161,7 @@ export interface Snapshot {
   }
   alarms: Alarm[]
   pending_approvals?: number
+  breakers?: Record<string, { state: 'normal' | 'tripped'; reasons: string[] }>
   today: {
     network: Record<string, number>
     objects: Record<string, Record<string, number>>
@@ -193,7 +194,8 @@ export interface Draft {
   source: string
   created_by: string
   created_at: string
-  status: 'drafted' | 'checked' | 'blocked' | 'pending_approval' | 'approved' | 'executed' | 'rejected' | 'expired'
+  status: 'drafted' | 'checked' | 'blocked' | 'pending_approval' | 'approved' | 'executed' | 'rejected' | 'expired' | 'revoked' | 'cancelled'
+  revoked_reason?: string
   expected: { before: Prediction; after: Prediction }
   check: { verdict: 'pass' | 'warn' | 'block'; items: CheckItem[]; ts: string } | null
   approval: { approver: string; comment: string; token: string; expires_at: string; ts: string } | null
@@ -244,6 +246,8 @@ export interface Command {
 export interface Policy {
   station_id: string
   autonomy: string
+  configured_autonomy?: string
+  breaker?: { state: 'normal' | 'tripped'; reasons: string[] }
   auto_sign: boolean
   params: Record<string, any>
   max_cmds_per_hour: number

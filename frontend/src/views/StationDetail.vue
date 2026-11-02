@@ -8,7 +8,8 @@
       </el-select>
       <span class="muted">{{ m.address }} · 面积 {{ fmt(m.area / 1e4, 1) }} 万m² · {{ m.system === 'radiator' ? '散热器' : '地暖' }}系统 ·
         设计热指标 {{ m.design_index }} W/m² · 热源 {{ rt.sourceMeta[m.source_id].name }}</span>
-      <el-tag :type="m.autonomy === 'L3' ? 'success' : 'info'" size="small">自治等级 {{ m.autonomy }}</el-tag>
+      <el-tag v-if="breaker?.state === 'tripped'" type="danger" size="small" effect="dark">自治等级 {{ m.autonomy }}→L1（管网熔断）</el-tag>
+      <el-tag v-else :type="m.autonomy === 'L3' ? 'success' : 'info'" size="small">自治等级 {{ m.autonomy }}</el-tag>
       <el-tag v-for="a in alarms" :key="a.id" :type="LEVEL_TYPE[a.level]" size="small" effect="dark">{{ a.message }}</el-tag>
     </div>
 
@@ -155,6 +156,7 @@ const d = computed(() => snap.value?.stations[id.value])
 const m = computed(() => rt.stationMeta[id.value])
 const today = computed(() => (snap.value?.today.objects[id.value] ?? {}) as Record<string, number>)
 const alarms = computed(() => snap.value!.alarms.filter((a) => a.object_id === id.value))
+const breaker = computed(() => (m.value ? snap.value?.breakers?.[m.value.source_id] : undefined))
 
 const settings = ref<ControlSettings | null>(null)
 const policy = ref<Policy | null>(null)

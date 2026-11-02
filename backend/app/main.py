@@ -29,6 +29,7 @@ from .auth import AGENT_PROFILES, PERMISSIONS, ROLES, AuthError, AuthService, Pr
 from .config import CURVE_TOUT, LIMITS, METRICS, SOURCE_BY_ID, SOURCES, STATION_BY_ID, STATIONS
 from .services.ai import AIService
 from .services.analytics import Analytics, name_of
+from .services.breaker import BreakerError, CircuitBreaker
 from .services.control import ControlError, ControlService
 from .services.embedding import load_embedder
 from .services.kb import KnowledgeBase
@@ -81,6 +82,7 @@ class State:
     ai: AIService
     auth: AuthService
     kb: KnowledgeBase
+    breaker: CircuitBreaker
     clients: dict[WebSocket, str]          # 连接 -> 令牌（每次推送前重新校验）
 
 
@@ -134,6 +136,14 @@ def draft_view(d: dict, p: Principal) -> dict:
     return d
 
 
+def agent_breaker_guard(p: Principal, station_id: str, what: str):
+    """熔断（L1）后，智能体不能做 R2/R3；人工操作照常。"""
+    if p.kind == "agent" and S.breaker.is_tripped(station_id):
+        net = S.breaker.network_of(station_id)
+        raise ControlError("BREAKER_OPEN", f"{SOURCE_BY_ID[net].name}管网已熔断（自治等级降为 L1），智能体不能{what}，"
+                                           f"请交由人工处理。熔断原因：{'；'.join(S.breaker.nets[net].reasons)}")
+
+
 def visible_draft(p: Principal, draft_id: str) -> dict:
     d = S.control.get_draft(draft_id.strip().upper())
     if not p.can_see(d["station_id"]):
@@ -152,8 +162,9 @@ def scoped_snapshot(p: Principal) -> dict:
     snap = S.engine.snapshot
     pending = [d for d in S.control.pending_approvals() if p.can_see(d["station_id"])]
     n_pending = len(pending) if (p.has("control:approve") or p.has("control:draft")) else 0
+    breakers = {k: v for k, v in S.breaker.summary().items() if p.can_see(k)}
     if p.is_global:
-        return {**snap, "pending_approvals": n_pending}
+        return {**snap, "pending_approvals": n_pending, "breakers": breakers}
     vs, vh = set(p.visible_stations), set(p.visible_sources)
     st = {k: v for k, v in snap["stations"].items() if k in vs}
     src = {k: v for k, v in snap["sources"].items() if k in vh}
@@ -172,7 +183,7 @@ def scoped_snapshot(p: Principal) -> dict:
     }
     return {**snap, "stations": st, "sources": src, "network": network,
             "alarms": [a for a in snap["alarms"] if p.can_see(a["object_id"])],
-            "today": {"network": today, "objects": objs}, "pending_approvals": n_pending}
+            "today": {"network": today, "objects": objs}, "pending_approvals": n_pending, "breakers": breakers}
 
 
 # ================================================================ 生命周期
@@ -183,6 +194,7 @@ async def ticker():
         now = time.time()
         try:
             S.engine.tick(now - last)
+            S.breaker.record_sample({k: v["online"] for k, v in S.engine.snapshot["stations"].items()}, now - last)
         except Exception:  # noqa: BLE001
             log.exception("tick failed")
         last = now
@@ -229,6 +241,13 @@ async def lifespan(app: FastAPI):
     S.ai = AIService(S.store, S.engine)
     S.auth = AuthService()
     S.kb = KnowledgeBase()
+    S.breaker = CircuitBreaker()
+    S.control.breaker = S.breaker
+    S.breaker.on_trip.append(S.control.on_breaker_trip)
+    S.breaker.on_reset.append(lambda net, by: S.control._audit("breaker_reset", by, net, {}, "reset"))
+    S.engine.alarm_hooks.append(lambda: [
+        (1, "BREAKER", k, SOURCE_BY_ID[k].name, "管网已熔断，自治等级降为 L1：" + "；".join(v["reasons"]))
+        for k, v in S.breaker.summary().items() if v["state"] == "tripped"])
     S.clients = {}
     task = asyncio.create_task(ticker())
     threading.Thread(target=warmup, daemon=True).start()
@@ -251,6 +270,11 @@ async def auth_error(_: Request, e: AuthError):
 @app.exception_handler(ControlError)
 async def control_error(_: Request, e: ControlError):
     return fail(400, e.code, e.message)
+
+
+@app.exception_handler(BreakerError)
+async def breaker_error(_: Request, e: BreakerError):
+    return fail(404 if e.code == "NOT_FOUND" else 400, e.code, e.message)
 
 
 @app.exception_handler(ValueError)
@@ -460,7 +484,7 @@ def settings(sid: str, p: Principal = Depends(need("monitor:read"))):
 def create_draft(body: DraftBody, p: Principal = Depends(need("control:draft"))):
     sid = see_station(p, body.station_id)
     source = "ai" if p.kind == "agent" else body.source
-    d = S.control.draft(sid, body.param, body.value, p.label, body.reason, source, owner=p.username)
+    d = S.control.draft(sid, body.param, body.value, p.label, body.reason, source, owner=p.username, actor_kind=p.kind)
     return env(draft_view(d, p), f"已生成草案 {d['draft_id']}：{d['description']}")
 
 
@@ -473,7 +497,9 @@ def check(draft_id: str, p: Principal = Depends(need("control:draft"))):
 
 @app.post("/api/control/drafts/{draft_id}/request-approval")
 def request_approval(draft_id: str, body: ApprovalRequestBody, p: Principal = Depends(need("control:draft"))):
-    d = S.control.request_approval(visible_draft(p, draft_id)["draft_id"], p.label, body.reason, body.timeout_s)
+    d0 = visible_draft(p, draft_id)
+    agent_breaker_guard(p, d0["station_id"], "提交审批（R2）")
+    d = S.control.request_approval(d0["draft_id"], p.label, body.reason, body.timeout_s)
     if d["status"] == "approved":
         return env(draft_view(d, p), "该草案已签发令牌（L3 站点安全网关自动签发或已人工批准）")
     return env(draft_view(d, p), f"已提交审批 {d['approval_request']['approval_id']}，等待值班调度确认")
@@ -492,7 +518,9 @@ def reject(draft_id: str, body: DecisionBody, p: Principal = Depends(need("contr
 
 @app.post("/api/control/drafts/{draft_id}/execute")
 def execute(draft_id: str, body: ExecBody, p: Principal = Depends(need("control:execute"))):
-    c = S.control.execute(visible_draft(p, draft_id)["draft_id"], body.token, p.label)
+    d0 = visible_draft(p, draft_id)
+    agent_breaker_guard(p, d0["station_id"], "下发指令（R3）")
+    c = S.control.execute(d0["draft_id"], body.token, p.label)
     return env(c, f"指令 {c['command_id']} 已下发并收到设备回执")
 
 
@@ -783,6 +811,39 @@ def kb_advice(alarm_id: str, p: Principal = Depends(need("kb:read", "monitor:rea
     docs = S.kb.search(f"{ev['description']} {' '.join(ev['alarm_codes'])}", top_k=3)
     return env({"event": ev, "cases": cases["cases"], "docs": docs["results"]},
                f"{ev['object_name']}：{ev['description']}；找到 {len(cases['cases'])} 个相似案例、{len(docs['results'])} 个规程片段")
+
+
+# ================================================================ 熔断
+class BreakerBody(BaseModel):
+    comment: str = ""
+
+
+@app.get("/api/breaker")
+def breaker_status(p: Principal = Depends(need("monitor:read"))):
+    rows = []
+    for net in p.visible_sources:
+        st = S.breaker.state(net)
+        st["name"] = SOURCE_BY_ID[net].name
+        st["stations"] = [{"id": s.id, "name": s.name, "configured": s.autonomy,
+                           "effective": S.breaker.effective_autonomy(s.id)}
+                          for s in STATIONS if s.source_id == net and p.can_see(s.id)]
+        rows.append(st)
+    n = sum(1 for r in rows if r["state"] == "tripped")
+    return env(rows, f"{n} 个管网处于熔断状态" if n else "所有管网正常")
+
+
+@app.post("/api/breaker/{network_id}/reset")
+def breaker_reset(network_id: str, body: BreakerBody, p: Principal = Depends(need("control:approve", human=True))):
+    see(p, network_id)
+    st = S.breaker.reset(network_id, p.label, body.comment)
+    return env(st, f"{SOURCE_BY_ID[network_id].name}熔断已解除，恢复配置的自治等级")
+
+
+@app.post("/api/breaker/{network_id}/trip")
+def breaker_trip(network_id: str, body: BreakerBody, p: Principal = Depends(need("control:approve", human=True))):
+    see(p, network_id)
+    st = S.breaker.trip(network_id, p.label, body.comment)
+    return env(st, f"已人工熔断 {SOURCE_BY_ID[network_id].name}，管网降为 L1")
 
 
 @app.get("/api/health")

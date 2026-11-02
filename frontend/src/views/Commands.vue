@@ -49,6 +49,10 @@
           </div>
         </div>
       </el-tab-pane>
+      <el-tab-pane name="breaker">
+        <template #label>熔断 <el-badge v-if="tripped" :value="tripped" type="danger" class="tab-badge" /></template>
+        <BreakerPanel v-if="tab === 'breaker'" />
+      </el-tab-pane>
       <el-tab-pane label="指令记录" name="cmd">
         <div class="panel">
           <el-table :data="cmds" size="small" empty-text="暂无下发记录（可在热力站详情页、AI 曲线优化或通过 MCP 智能体下发）">
@@ -125,7 +129,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import BreakerPanel from '@/components/BreakerPanel.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getData, postData } from '@/api/http'
 import type { Command, Draft } from '@/api/types'
@@ -135,13 +140,16 @@ import { useRealtime } from '@/stores/realtime'
 import { fmt } from '@/utils/format'
 
 const STATUS: Record<string, string> = {
+  revoked: '令牌作废（熔断）', cancelled: '已取消（熔断）',
   drafted: '已草拟', checked: '已校验', blocked: '已拦截', pending_approval: '待审批', approved: '已批准',
   executed: '已执行', rejected: '已驳回', expired: '已过期',
 }
 const router = useRouter()
 const rt = useRealtime()
 const auth = useAuth()
-const tab = ref('cmd')
+const route = useRoute()
+const tab = ref((route.query.tab as string) || 'cmd')
+const tripped = computed(() => Object.values(rt.snap?.breakers ?? {}).filter((b) => b.state === 'tripped').length)
 const cmds = ref<Command[]>([])
 const drafts = ref<Draft[]>([])
 const pending = ref<Draft[]>([])
@@ -163,7 +171,7 @@ async function load() {
     ctl ? getData<Draft[]>('/api/control/approvals') : Promise.resolve([]),
     auth.has('audit:read') ? getData<any[]>('/api/audit') : Promise.resolve([]),
   ])
-  if (first && pending.value.length && auth.has('control:approve')) tab.value = 'approve'
+  if (first && !route.query.tab && pending.value.length && auth.has('control:approve')) tab.value = 'approve'
   first = false
 }
 async function execute(d: Draft) {

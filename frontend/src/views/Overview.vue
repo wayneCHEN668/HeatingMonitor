@@ -1,5 +1,11 @@
 <template>
   <div class="page" v-if="snap && meta">
+    <el-alert v-for="(b, id) in trippedNets" :key="id" type="error" show-icon :closable="false" class="breaker-alert"
+              :title="`${rtStore.sourceMeta[id]?.name ?? id} 管网已熔断，自治等级降为 L1（自动签发与智能体调控暂停，人工操作照常）`">
+      <template #default>{{ b.reasons.join('；') }}
+        <router-link v-if="auth.hasAny('control:draft', 'control:approve', 'audit:read')" to="/commands?tab=breaker"> 查看与复核 →</router-link>
+      </template>
+    </el-alert>
     <div class="grid kpis">
       <KpiCard label="热负荷" :value="fmt(snap.network.heat_mw)" unit="MW" tone="supply"
                :sub="`装机 ${snap.network.capacity_mw}MW · 负荷率 ${fmt((snap.network.heat_mw / snap.network.capacity_mw) * 100)}%`" />
@@ -64,12 +70,17 @@ import EChart from '@/components/EChart.vue'
 import KpiCard from '@/components/KpiCard.vue'
 import NetworkTopology from '@/components/diagrams/NetworkTopology.vue'
 import { getData } from '@/api/http'
+import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { fmt, fmtInt, KIND_TEXT, LEVEL_TEXT, LEVEL_TYPE } from '@/utils/format'
 
 defineOptions({ name: 'Overview' })
 const router = useRouter()
-const { snap, meta } = storeToRefs(useRealtime())
+const rtStore = useRealtime()
+const auth = useAuth()
+const { snap, meta } = storeToRefs(rtStore)
+const trippedNets = computed(() =>
+  Object.fromEntries(Object.entries(snap.value?.breakers ?? {}).filter(([, b]) => b.state === 'tripped')))
 const today = computed(() => snap.value!.today.network as Record<string, number>)
 const sources = computed(() => Object.values(snap.value!.sources))
 const coldCount = computed(() => Object.values(snap.value!.stations).filter((s) => s.tin < 18).length)
@@ -125,6 +136,7 @@ const tinOpt = computed<EChartsOption>(() => {
 
 <style scoped>
 .kpis { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.breaker-alert :deep(.el-alert__title) { font-weight: 700; }
 .main { grid-template-columns: minmax(0, 1fr) 380px; }
 .side { display: flex; flex-direction: column; gap: 12px; }
 .bottom { grid-template-columns: 3fr 2fr; }

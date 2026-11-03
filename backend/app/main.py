@@ -34,7 +34,7 @@ from .services.control import ControlError, ControlService
 from .services.embedding import load_embedder
 from .services.kb import KnowledgeBase
 from .services.ops import PRIORITY_SLA_H, WO_TYPES, MasterData, OpsError, OpsService
-from .services.reports import REPORT_TYPES, ReportError, ReportService
+from .services.reports import CONTENT_PERMS, DEDUPE_MIN, REPORT_TYPES, ReportError, ReportService
 from .services.service_desk import NOTICE_KINDS, ServiceDesk, classify_request
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
@@ -1199,6 +1199,9 @@ def _report_visible(p: Principal, r: dict) -> bool:
     """报告是数据快照：只有能看到报告覆盖的全部对象的人才能看；事故报告含审计记录，另需 audit:read。"""
     if r["type"] == "incident" and not p.has("audit:read"):
         return False
+    # 报告内容随生成者权限包含工单/诉求/异常检测章节；查看者须具备同样的权限
+    if not set(r["_key"][4]) <= {x for x in CONTENT_PERMS if p.has(x)}:
+        return False
     sid = r["scope_id"]
     if sid in STATION_BY_ID or sid in SOURCE_BY_ID:
         return p.can_see(sid)
@@ -1249,7 +1252,7 @@ def report_generate(body: ReportBody, p: Principal = Depends(need("report:write"
         S.control._audit("report_generate", p.label, r["scope_id"], {"report_id": r["report_id"], "type": r["type"],
                                                                     "period": r["period"]["label"]}, "ok")
     meta = _report_meta(r)
-    msg = (f"{r['title']}：{'复用 10 分钟内已生成的同一报告' if r['reused'] else '已生成'}，"
+    msg = (f"{r['title']}：{f'复用 {DEDUPE_MIN} 分钟内已生成的同一报告' if r['reused'] else '已生成'}，"
            f"正文 {r['check']['numbers_checked']} 个数字全部核对通过（{time.time() - t0:.1f}s）")
     return env({**meta, "reused": r["reused"], "warnings": r["warnings"]}, msg, warnings=r["warnings"],
                evidence=[{"type": "fingerprint", "text": f"数据指纹 {r['fingerprint']}"}])

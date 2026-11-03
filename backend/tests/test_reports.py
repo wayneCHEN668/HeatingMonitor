@@ -111,6 +111,9 @@ def test_sections_follow_caller_permissions(tc):
     assert rep["actor_kind"] == "agent" and not any("工单" in s["heading"] for s in rep["sections"])
     mine = S.reports.get(gen(tc, "manager", report_type="weekly", period="2026-10-26~2026-11-01").json()["data"]["report_id"])
     assert any("工单" in s["heading"] for s in mine["sections"])
+    # 智能体不能通过 REST 读取含工单章节（它自己无权生成）的报告
+    assert tc.get(f"/api/reports/{mine['report_id']}", headers=H(tc.analyst)).status_code == 403
+    assert tc.get(f"/api/reports/{out['data']['report_id']}", headers=H(tc.analyst)).status_code == 200
 
 
 async def _run(tc, token, scenario):
@@ -158,6 +161,20 @@ def test_incident_report_review_and_html(tc):
     rep = S.reports.get(rid)
     assert rep["sections"][-1]["human_written"] and ReportService.reverify(rep)["ok"]
     assert tc.post(f"/api/reports/{rid}/review", headers=H(tc.s["chief"]), json={"approve": True, "conclusion": "再次审核测试"}).status_code == 400
+
+
+def test_incident_picks_alarm_occurrence(tc):
+    """报警 ID 会在多次发生间复用；ID@首次发生时间 指定某一次。"""
+    log = S.engine.alarm_log
+    base = dict(log[0])
+    old = {**base, "first_ts": "2026-11-03T01:00:00", "cleared_ts": "2026-11-03T01:30:00", "active": False}
+    log.append(old)
+    try:
+        r = gen(tc, "chief", report_type="incident", event_id=f"{old['id']}@{old['first_ts']}", force=True).json()
+        assert r["ok"], r
+        assert "11-03 01:00" in S.reports.get(r["data"]["report_id"])["title"]
+    finally:
+        log.remove(old)
 
 
 def test_persistence(tc):

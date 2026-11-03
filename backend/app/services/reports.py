@@ -164,9 +164,16 @@ class ReportService:
             return [scope]
         return [s.id for s in SOURCES if sources is None or s.id in sources]
 
-    def summ(self, oid: str, start: datetime, end: datetime, sources=None) -> dict:
+    def summ(self, oid: str, start: datetime, end: datetime, sources=None, cache: dict | None = None) -> dict:
+        """cache：单次报告生成内复用对象时序（NET 时序每次都要把所有热源和站汇总，重复构造代价高）。"""
         a = self.analytics
-        return a._summary(oid, a._slice(oid, start, end, sources), sources)
+        if cache is None:
+            return a._summary(oid, a._slice(oid, start, end, sources), sources)
+        k = (oid, tuple(sorted(sources)) if sources else None)
+        if k not in cache:
+            cache[k] = self.store.frame(oid, sources)
+        df = cache[k]
+        return a._summary(oid, df.loc[(df.index >= start) & (df.index < end)], sources)
 
     @staticmethod
     def compliance(rows: list[dict]) -> tuple[float | None, int, int]:
@@ -257,7 +264,7 @@ class ReportService:
                         return {**r, "reused": True}
         F = Facts()
         ctx = {"F": F, "scope": scope, "sources": sources, "start": start, "end": end, "label": label,
-               "scope_name": name_of(scope, sources), "can_see": can_see, "has": has}
+               "scope_name": name_of(scope, sources), "can_see": can_see, "has": has, "cache": {}}
         builder = {"daily": self._daily, "weekly": self._weekly, "energy": self._energy, "incident": self._incident}[rtype]
         rep = builder(ctx, event_id) if rtype == "incident" else builder(ctx)
         rep.update({"report_id": "RP" + uuid.uuid4().hex[:8].upper(), "type": rtype, "type_name": REPORT_TYPES[rtype],
@@ -327,8 +334,8 @@ class ReportService:
         day = ctx["start"].date()
         d = self.analytics.daily(day, scope, sources)
         s, c = d["summary"], d["compare"]
-        prev_s = self.summ(scope, ctx["start"] - timedelta(days=1), ctx["start"], sources)
-        ly_s = self.summ(scope, ctx["start"] - YEAR, ctx["end"] - YEAR, sources)
+        prev_s = self.summ(scope, ctx["start"] - timedelta(days=1), ctx["start"], sources, cache=ctx['cache'])
+        ly_s = self.summ(scope, ctx["start"] - YEAR, ctx["end"] - YEAR, sources, cache=ctx['cache'])
         n_dod, n_yoy = norm_change(s, prev_s), norm_change(s, ly_s)
         name = F.lit(ctx["scope_name"])
         dl = F.lit(day.isoformat())
@@ -438,11 +445,11 @@ class ReportService:
     def _weekly(self, ctx) -> dict:
         F, scope, sources, start, end = ctx["F"], ctx["scope"], ctx["sources"], ctx["start"], ctx["end"]
         days = (end - start).days
-        cur = self.summ(scope, start, end, sources)
+        cur = self.summ(scope, start, end, sources, cache=ctx['cache'])
         if not cur.get("hours"):
             raise ReportError("NO_DATA", "期间内无运行数据")
-        prev = self.summ(scope, start - timedelta(days=days), start, sources)
-        ly = self.summ(scope, start - YEAR, end - YEAR, sources)
+        prev = self.summ(scope, start - timedelta(days=days), start, sources, cache=ctx['cache'])
+        ly = self.summ(scope, start - YEAR, end - YEAR, sources, cache=ctx['cache'])
         name = F.lit(ctx["scope_name"])
         warnings = []
         if prev.get("hours", 0) < days * 24 * 0.9:
@@ -462,8 +469,8 @@ class ReportService:
         trend_x, trend_cur, trend_ly = [], [], []
         dd = start
         while dd < end:
-            a = self.summ(scope, dd, dd + timedelta(days=1), sources)
-            b = self.summ(scope, dd - YEAR, dd + timedelta(days=1) - YEAR, sources)
+            a = self.summ(scope, dd, dd + timedelta(days=1), sources, cache=ctx['cache'])
+            b = self.summ(scope, dd - YEAR, dd + timedelta(days=1) - YEAR, sources, cache=ctx['cache'])
             trend_x.append(dd.strftime("%m-%d"))
             trend_cur.append(a.get("norm_heat"))
             trend_ly.append(b.get("norm_heat"))
@@ -479,7 +486,7 @@ class ReportService:
         sts = self.stations_in(scope, sources)
         rows = []
         for sid in sts:
-            r = self.summ(sid, start, end)
+            r = self.summ(sid, start, end, cache=ctx['cache'])
             if r.get("hours"):
                 r["compliance"] = _r((1 - r["tin_low_hours"] / r["hours"]) * 100, 1)
                 rows.append(r)
@@ -498,10 +505,11 @@ class ReportService:
             if worst_c:
                 paras.append("达标率最低的站：" + "、".join(
                     f"{F.lit(r['name'])} {F.n('comp_' + r['id'], r['compliance'], 1)}%" for r in worst_c) + "。")
+        above = sorted([r for r in rows if (r.get("vs_median") or 0) > 0], key=lambda r: -r["vs_median"])[:3]
         if med and len(rows) >= 3:
-            paras.append(f"各站修正单耗中位数 {F.n('median_norm', med, 1, 'kJ/(m²·℃·d)')}，高出中位数最多的站：" + "、".join(
-                f"{F.lit(r['name'])}（{'高' if r['vs_median'] >= 0 else '低'} {F.n('vsm_' + r['id'], abs(r['vs_median']), 1)}%）"
-                for r in sorted(rows, key=lambda r: -(r["vs_median"] or -999))[:3]) + "。")
+            paras.append(f"各站修正单耗中位数 {F.n('median_norm', med, 1, 'kJ/(m²·℃·d)')} kJ/(m²·℃·d)" + (
+                "，高出中位数最多的站：" + "、".join(f"{F.lit(r['name'])}（高 {F.n('vsm_' + r['id'], r['vs_median'], 1)}%）" for r in above)
+                if above else "，各站差异很小") + "。")
         sections.append({"heading": "二、室温达标与能效对标", "paragraphs": paras,
                          "table": {"columns": [["name", "热力站"], ["norm_heat", "修正单耗"], ["vs_median", "较中位数 %"],
                                                ["tin_avg", "平均室温 ℃"], ["compliance", "达标率 %"], ["unit_water", "补水 kg/千m²"]],
@@ -565,13 +573,15 @@ class ReportService:
     # ================================================================ 节能报告
     def _energy(self, ctx) -> dict:
         F, scope, sources, start, end = ctx["F"], ctx["scope"], ctx["sources"], ctx["start"], ctx["end"]
-        cur = self.summ(scope, start, end, sources)
-        base = self.summ(scope, start - YEAR, end - YEAR, sources)
+        cur = self.summ(scope, start, end, sources, cache=ctx['cache'])
+        base = self.summ(scope, start - YEAR, end - YEAR, sources, cache=ctx['cache'])
         exp_h = (min(end, now_local()) - start).total_seconds() / 3600
         if not cur.get("hours") or cur["hours"] < exp_h * 0.9:
             raise ReportError("NO_DATA", "期间内运行数据不完整（本采暖季数据从开栓日起），请缩短期间")
         if not base.get("hours") or not base.get("hdd"):
             raise ReportError("NO_BASELINE", "去年同期无基准数据")
+        if not cur.get("hdd") or cur["hdd"] < 0.5 or not base.get("heat_gj"):
+            raise ReportError("NO_HDD", "本期度日数接近 0（室外温度均高于基准温度），无法做度日数修正，请延长期间")
         A = area_of(scope, sources)
         Qc, Qb, Hc, Hb = cur["heat_gj"], base["heat_gj"], cur["hdd"], base["hdd"]
         Ic, Ib = Qc * 1e6 / (A * Hc), Qb * 1e6 / (A * Hb)             # kJ/(m²·℃·d)
@@ -605,8 +615,8 @@ class ReportService:
         tx, tc_, tb_ = [], [], []
         dd = start
         while dd < end:
-            a = self.summ(scope, dd, dd + timedelta(days=1), sources)
-            b = self.summ(scope, dd - YEAR, dd + timedelta(days=1) - YEAR, sources)
+            a = self.summ(scope, dd, dd + timedelta(days=1), sources, cache=ctx['cache'])
+            b = self.summ(scope, dd - YEAR, dd + timedelta(days=1) - YEAR, sources, cache=ctx['cache'])
             tx.append(dd.strftime("%m-%d"))
             tc_.append(a.get("norm_heat"))
             tb_.append(b.get("norm_heat"))
@@ -682,7 +692,9 @@ class ReportService:
         F, sources, can_see = ctx["F"], ctx["sources"], ctx["can_see"]
         eid = event_id.strip()
         now = now_local()
-        alarm = next((a for a in self.engine.alarm_log if a["id"] == eid), None)
+        # 报警 ID 是报警类型键，会在多次发生间复用；“ID@首次发生时间”可指定某一次，只给 ID 时取最近一次
+        aid, _, ats = eid.partition("@")
+        alarm = next((a for a in self.engine.alarm_log if a["id"] == aid and (not ats or a["first_ts"] == ats)), None)
         cmd = self.control.commands.get(eid.upper()) if not alarm else None
         if alarm:
             oid, oname = alarm["object_id"], alarm["object_name"]

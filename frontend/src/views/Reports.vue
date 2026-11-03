@@ -88,7 +88,7 @@
                            :label="`${c.command_id} ${c.station_name} ${c.description}${c.status === 'rolled_back' ? '（已回滚）' : ''}`" />
               </el-option-group>
               <el-option-group label="报警">
-                <el-option v-for="a in alarms" :key="a.id + a.first_ts" :value="a.id"
+                <el-option v-for="a in alarms" :key="a.id + a.first_ts" :value="`${a.id}@${a.first_ts}`"
                            :label="`${a.first_ts.slice(5, 16).replace('T', ' ')} ${a.object_name} ${a.message}`" />
               </el-option-group>
             </el-select>
@@ -192,6 +192,7 @@ async function openHtml() {
   if (!res.ok) return ElMessage.error('打开失败')
   const url = URL.createObjectURL(new Blob([await res.text()], { type: 'text/html' }))
   window.open(url, '_blank', 'noopener')
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 async function review(approve: boolean) {
   try {

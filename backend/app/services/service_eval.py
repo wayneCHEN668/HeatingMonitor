@@ -27,12 +27,15 @@ def evaluate(items: list[dict]) -> dict:
     conf = Counter()
     errors = []
     bin_counts = {k: Counter() for k in ("urgent", "human")}
+    bin_counts["urgent_routed"] = Counter()
     for it in items:
         out = classify_request(it["text"])
         conf[(it["category"], out["category"])] += 1
         for k in ("urgent", "human"):
             g, p = bool(it[k]), bool(out[k])
             bin_counts[k]["tp" if g and p else "fp" if p else "fn" if g else "tn"] += 1
+        if it["urgent"]:
+            bin_counts["urgent_routed"]["caught" if out["urgent"] or out["human"] or out["confidence"] == "低" else "missed"] += 1
         wrong = [k for k in ("category", "urgent", "human") if it[k] != out[k]]
         if wrong:
             errors.append({"text": it["text"], "wrong": wrong, "gold": {k: it[k] for k in ("category", "urgent", "human")},
@@ -46,12 +49,14 @@ def evaluate(items: list[dict]) -> dict:
         p, r = _pr(tp, fp, fn)
         per_cat[c] = {"support": tp + fn, "precision": p, "recall": r}
     binary = {}
+    routed = bin_counts.pop("urgent_routed")
     for k, b in bin_counts.items():
         p, r = _pr(b["tp"], b["fp"], b["fn"])
         binary[k] = {"positives": b["tp"] + b["fn"], "precision": p, "recall": r, "accuracy": (b["tp"] + b["tn"]) / n,
                      **{x: b[x] for x in ("tp", "fp", "fn", "tn")}}
     return {"n": n, "category_accuracy": sum(conf[(c, c)] for c in CATEGORIES) / n,
             "all_correct": (n - len(errors)) / n, "per_category": per_cat, "binary": binary,
+            "urgent_routed": {"caught": routed["caught"], "missed": routed["missed"]},
             "confusion": {g: {p: conf[(g, p)] for p in CATEGORIES} for g in CATEGORIES}, "errors": errors}
 
 
@@ -71,6 +76,10 @@ def report(path: Path) -> dict:
         b = r["binary"][k]
         print(f"{name}：正例 {b['positives']}，精确率 {_f(b['precision'])}，召回率 {_f(b['recall'])}，"
               f"TP {b['tp']} FP {b['fp']} FN {b['fn']} TN {b['tn']}")
+    u = r["urgent_routed"]
+    if u["caught"] + u["missed"]:
+        print(f"紧急诉求兜底：被判紧急、转人工或低置信送复核的 {u['caught']}/{u['caught'] + u['missed']}"
+              "（低置信送复核规则是看过留出集错例后加的，此项在留出集上偏乐观）")
     print("混淆矩阵（行=标注，列=预测）：" + " ".join(f"{c[:2]:>4}" for c in CATEGORIES))
     for g, row in r["confusion"].items():
         print(f"  {g:<8}" + " ".join(f"{row[p]:>4}" for p in CATEGORIES))

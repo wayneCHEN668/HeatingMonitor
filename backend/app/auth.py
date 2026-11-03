@@ -40,6 +40,12 @@ PERMISSIONS: dict[str, str] = {
     "kb:write": "提交处置案例（待专家审核）",
     "kb:review": "审核处置案例",
     "kb:manage": "上传与删除知识库文档",
+    "ops:read": "查看工单、巡检计划、交接班",
+    "ops:write": "创建与派发工单、生成巡检计划、接收移交",
+    "service:read": "查看客服诉求、用户概况（脱敏）、通知",
+    "service:write": "登记诉求、生成回复草稿、移交调度",
+    "service:notify": "确认并发送停热/抢修等用户通知",
+    "customer:pii": "查看用户完整姓名与电话（记审计）",
 }
 _ALL = frozenset(PERMISSIONS)
 _VIEW = {"monitor:read", "analytics:read", "ai:read", "kb:read"}
@@ -47,21 +53,30 @@ _VIEW = {"monitor:read", "analytics:read", "ai:read", "kb:read"}
 ROLES: dict[str, tuple[str, frozenset[str]]] = {
     "admin": ("系统管理员", _ALL),
     "chief": ("值班调度长", frozenset(_VIEW | {"alarm:ack", "control:draft", "control:execute", "control:approve",
-                                              "audit:read", "agent:delegate", "kb:write", "kb:review"})),
+                                              "audit:read", "agent:delegate", "kb:write", "kb:review",
+                                              "ops:read", "ops:write", "service:read"})),
     "dispatcher": ("调度员", frozenset(_VIEW | {"alarm:ack", "control:draft", "control:execute", "agent:delegate",
-                                            "kb:write"})),
-    "manager": ("经营管理", frozenset(_VIEW | {"agent:delegate"})),
-    "stationmaster": ("片区站长", frozenset(_VIEW | {"alarm:ack", "agent:delegate", "kb:write"})),
-    "service": ("客服坐席", frozenset({"monitor:read", "agent:delegate", "kb:read"})),
+                                            "kb:write", "ops:read", "ops:write", "service:read"})),
+    "manager": ("经营管理", frozenset(_VIEW | {"agent:delegate", "ops:read", "service:read"})),
+    "stationmaster": ("片区站长", frozenset(_VIEW | {"alarm:ack", "agent:delegate", "kb:write", "ops:read", "ops:write",
+                                              "service:read"})),
+    "service": ("客服坐席", frozenset({"monitor:read", "agent:delegate", "kb:read", "ops:read", "ops:write",
+                                      "service:read", "service:write", "service:notify", "customer:pii"})),
 }
 
 # 智能体档案白名单（设计文档第九节：只有调度智能体可以使用 control_*；任何智能体都不能批准）
 AGENT_PROFILES: dict[str, tuple[str, frozenset[str]]] = {
-    "dispatch": ("调度智能体", frozenset(_VIEW | {"control:draft", "control:execute", "kb:write"})),
+    "dispatch": ("调度智能体", frozenset(_VIEW | {"control:draft", "control:execute", "kb:write", "ops:read",
+                                              "service:read"})),
     "analyst": ("分析智能体", frozenset(_VIEW)),
+    # 客服智能体：查用户概况（只脱敏）、分类、写回复草稿、建工单、移交调度；通知只能起草，发送须人工确认
+    "service": ("客服智能体", frozenset({"monitor:read", "kb:read", "ops:read", "ops:write", "service:read",
+                                         "service:write", "service:notify"})),
+    # 运维智能体：工单、派单建议、巡检计划、交接班；可沉淀处置案例
+    "ops": ("运维智能体", frozenset({"monitor:read", "ai:read", "kb:read", "kb:write", "ops:read", "ops:write"})),
 }
-# 任何智能体都不能批准调控、不能审核案例、不能管理知识库文档
-assert all(not p & {"control:approve", "kb:review", "kb:manage"} for _, p in AGENT_PROFILES.values())
+# 任何智能体都不能批准调控、不能审核案例、不能管理知识库文档、不能看用户完整个人信息
+assert all(not p & {"control:approve", "kb:review", "kb:manage", "customer:pii"} for _, p in AGENT_PROFILES.values())
 
 SESSION_TTL = 12 * 3600
 AGENT_TTL_MAX_DAYS = 90

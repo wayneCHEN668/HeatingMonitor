@@ -457,7 +457,7 @@ class OpsService:
         for a in active:
             if a["level"] == 1:
                 notes.append(f"一级报警未恢复：{a['object_name']} {a['message']}")
-        notes += [f"超时工单：{w['workorder_id']} {w['station_name']} {w['type']}（应于 {w['due_at'][5:16]} 前到场）" for w in open_overdue]
+        notes += [f"超时工单：{w['workorder_id']} {w['station_name']} {w['type']}（应于 {w['due_at'][5:16].replace('T', ' ')} 前到场）" for w in open_overdue]
         notes += [f"待审批调控：{d['station_name']} {d['param_text']}（{d['approval_request']['approval_id']}）" for d in pend]
         notes += [f"{SOURCE_BY_ID[n].name}管网熔断中，需复核后解除" for n in tripped]
         notes += [f"未结移交：{h['summary']}" for h in hand]

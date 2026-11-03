@@ -71,7 +71,7 @@ def test_tool_catalog_dispatch(tc):
 
     tools = run(tc, tc.agent["disp"], s)
     by = {t.name: t for t in tools}
-    assert len(tools) == 20
+    assert len(tools) == 25          # 20 个监控/分析/调控/知识库工具 + 4 个运维只读/计算 + 用户 360
     assert all(re.fullmatch(r"[a-z0-9_]+", n) for n in by)
     assert not any("approve" in n for n in by)
     assert by["control_execute"].annotations.destructive_hint is True

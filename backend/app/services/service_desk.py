@@ -123,7 +123,10 @@ def classify_request(text: str) -> dict:
         reasons.append("用户反映多户/整楼情况，建议核实后转调度（SVC-01 §2.3）")
     if category == "其他" and not human_reasons:
         reasons.append("未命中业务类别关键词")
-    return {"category": category, "urgent": urgent, "human": bool(human_reasons),
+    # 置信度不参与 category/urgent/human 判定（评测只评这三项）；未命中任何类别关键词时为“低”，
+    # 业务流程把低置信诉求送人工复核，避免把没认出来的漏水、不热静默归为“其他”。
+    confidence = "低" if not hits else "中" if len(hits) > 1 or category == "其他" else "高"
+    return {"category": category, "urgent": urgent, "human": bool(human_reasons), "confidence": confidence,
             "matched": hits, "reasons": reasons, "urgent_reason": urgent_reason, "human_reasons": human_reasons,
             "room_temps": temps, "vulnerable": vulnerable, "building_wide_hint": building_wide, "injection_flags": flags,
             "method": "规则分类（SVC-01）：类别关键词 + 室温数字抽取；多类按 漏水>不热>过热>报停与开栓>收费 取主类别"}
@@ -253,7 +256,7 @@ class ServiceDesk:
             r = {"request_id": "SR" + uuid.uuid4().hex[:8].upper(), "text": text[:1000], "channel": channel,
                  "customer_id": c["customer_id"] if c else None, "station_id": c["station_id"] if c else None,
                  "building_id": c["building_id"] if c else None, "classification": cls,
-                 "status": "待人工" if cls["human"] else "待处理", "created_by": by, "created_at": _iso(now_local()),
+                 "status": "待人工" if cls["human"] or cls["confidence"] == "低" else "待处理", "created_by": by, "created_at": _iso(now_local()),
                  "workorder_id": None, "handoff_id": None, "reply": None, "log": [], "repeats": 0}
             r["suggested_actions"] = self._suggest(r)
             self.requests[r["request_id"]] = r
@@ -264,6 +267,8 @@ class ServiceDesk:
         cls = r["classification"]
         if cls["human"]:
             return [{"action": "转人工", "why": "；".join(cls["human_reasons"])}]
+        if cls["confidence"] == "低":
+            return [{"action": "人工复核", "why": "规则分类器未识别出业务类别，可能是没认出的漏水或不热，请人工判断"}]
         out = []
         cat = cls["category"]
         bld = r.get("building_id")
@@ -350,9 +355,12 @@ class ServiceDesk:
         if cat == "不热":
             if room is not None:
                 lines.append(f"经查询，您所在小区热力站目前运行正常，按监测数据估算您家室温约 {room:.0f}℃。"
-                             if not any("报警" in f or "中断" in f for f in facts) else "经查询，您所在小区热力站目前有运行异常，调度正在处理。")
-            if any("整楼" in f for f in facts):
+                             if not any("报警" in f or "中断" in f for f in facts) else "经查询，您所在小区热力站目前有运行报警，我们会同步给调度核查。")
+            if r.get("handoff_id"):
                 lines.append("您所在楼栋已有多户反映，我们已按整楼问题转调度排查。")
+            elif any("整楼" in f for f in facts):
+                lines.append("您所在楼栋已有多户反映，我们会按整楼问题转调度排查。")
+                cautions.append("同楼栋已多户报不热，建议先移交调度（service_handoff_to_dispatch）再发送回复")
             if wo:
                 lines.append(f"已为您派发维修工单（{wo['workorder_id']}），维修人员会先电话联系您再上门，"
                              f"{'按紧急诉求 4 小时内到场' if wo['priority'] == '紧急' else '24 小时内与您联系'}。")

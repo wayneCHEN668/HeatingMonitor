@@ -33,6 +33,8 @@ from .services.breaker import BreakerError, CircuitBreaker
 from .services.control import ControlError, ControlService
 from .services.embedding import load_embedder
 from .services.kb import KnowledgeBase
+from .services.ops import PRIORITY_SLA_H, WO_TYPES, MasterData, OpsError, OpsService
+from .services.service_desk import NOTICE_KINDS, ServiceDesk, classify_request
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
 from .sim.realtime import Engine
@@ -83,6 +85,8 @@ class State:
     auth: AuthService
     kb: KnowledgeBase
     breaker: CircuitBreaker
+    ops: OpsService
+    service: ServiceDesk
     clients: dict[WebSocket, str]          # 连接 -> 令牌（每次推送前重新校验）
 
 
@@ -248,6 +252,8 @@ async def lifespan(app: FastAPI):
     S.engine.alarm_hooks.append(lambda: [
         (1, "BREAKER", k, SOURCE_BY_ID[k].name, "管网已熔断，自治等级降为 L1：" + "；".join(v["reasons"]))
         for k, v in S.breaker.summary().items() if v["state"] == "tripped"])
+    S.ops = OpsService(S.engine, S.control, S.ai, S.kb, S.breaker, MasterData())
+    S.service = ServiceDesk(S.ops, S.kb, S.engine, S.control)
     S.clients = {}
     task = asyncio.create_task(ticker())
     threading.Thread(target=warmup, daemon=True).start()
@@ -275,6 +281,11 @@ async def control_error(_: Request, e: ControlError):
 @app.exception_handler(BreakerError)
 async def breaker_error(_: Request, e: BreakerError):
     return fail(404 if e.code == "NOT_FOUND" else 400, e.code, e.message)
+
+
+@app.exception_handler(OpsError)
+async def ops_error(_: Request, e: OpsError):
+    return fail({"NOT_FOUND": 404, "OUT_OF_SCOPE": 403}.get(e.code, 400), e.code, e.message)
 
 
 @app.exception_handler(ValueError)
@@ -844,6 +855,322 @@ def breaker_trip(network_id: str, body: BreakerBody, p: Principal = Depends(need
     see(p, network_id)
     st = S.breaker.trip(network_id, p.label, body.comment)
     return env(st, f"已人工熔断 {SOURCE_BY_ID[network_id].name}，管网降为 L1")
+
+
+# ================================================================ 运维
+def _stations(p: Principal, object_id: str | None = None) -> list[str]:
+    """按对象（NET/热源/热力站）展开为可见热力站列表。"""
+    oid = see(p, object_id or "NET")
+    if oid == "NET":
+        return list(p.visible_stations)
+    if oid in SOURCE_BY_ID:
+        return [s.id for s in STATIONS if s.source_id == oid and p.can_see(s.id)]
+    return [oid]
+
+
+def _wo_visible(p: Principal, wid: str) -> dict:
+    w = S.ops.get(wid.strip().upper())
+    if not p.can_see(w["station_id"]):
+        raise AuthError(403, "OUT_OF_SCOPE", "该工单不在数据范围内")
+    return w
+
+
+class WorkorderBody(BaseModel):
+    object_id: str = ""
+    type: str
+    description: str
+    priority: str = "普通"
+    customer_id: str | None = None
+    request_id: str | None = None
+    auto_assign: bool = True
+
+
+class AssignBody(BaseModel):
+    staff_id: str
+
+
+class StatusBody(BaseModel):
+    status: str
+    result: str = ""
+
+
+class PatrolBody(BaseModel):
+    object_id: str = "NET"
+    date: str | None = None
+    focus: str = "风险优先"
+    max_stops: int = Field(6, ge=1, le=13)
+
+
+@app.get("/api/ops/meta")
+def ops_meta(p: Principal = Depends(need("ops:read", "service:read", any_of=True))):
+    return env({"types": WO_TYPES, "priorities": PRIORITY_SLA_H, "notice_kinds": list(NOTICE_KINDS),
+                "buildings": [{k: b[k] for k in ("building_id", "station_id", "name", "households")}
+                              for b in S.ops.md.buildings.values() if p.can_see(b["station_id"])]})
+
+
+@app.get("/api/ops/workorders")
+def ops_workorders(status: str | None = None, type: str | None = None, days: int = Query(7, ge=1, le=60),
+                   object_id: str | None = None, p: Principal = Depends(need("ops:read"))):
+    oid = object_id.strip() if object_id else None
+    if oid and (oid.upper() in STATION_BY_ID or oid.upper() in SOURCE_BY_ID):
+        oid = see(p, oid)
+    r = S.ops.query(stations=set(p.visible_stations), status=status or None, typ=type or None, days=days, object_id=oid)
+    hot = [c for c in r["clusters"] if c["whole_building"]]
+    return env(r, f"近 {days} 天工单 {r['total']} 张，未完成 {sum(v for k, v in r['by_status'].items() if k not in ('已完成', '已关闭'))} 张，"
+                  f"超时 {r['overdue']} 张" + (f"；{len(hot)} 个楼栋疑似整楼不热" if hot else ""),
+               warnings=[c["hint"] + f"：{c['object_name']}" for c in hot])
+
+
+@app.get("/api/ops/workorders/{wid}")
+def ops_workorder(wid: str, p: Principal = Depends(need("ops:read"))):
+    return env(_wo_visible(p, wid))
+
+
+@app.post("/api/ops/workorders")
+def ops_create(body: WorkorderBody, p: Principal = Depends(need("ops:write"))):
+    if body.customer_id:
+        c = S.ops.md.customers.get(body.customer_id.strip())
+        if not c:
+            raise OpsError("NOT_FOUND", f"住户 {body.customer_id} 不存在")
+        if not p.can_see(c["station_id"]):
+            raise AuthError(403, "OUT_OF_SCOPE", "该住户不在数据范围内")
+    else:
+        oid = body.object_id.strip()
+        sid = S.ops.md.buildings[oid]["station_id"] if oid in S.ops.md.buildings else see_station(p, oid)
+        if not p.can_see(sid):
+            raise AuthError(403, "OUT_OF_SCOPE", "该对象不在数据范围内")
+    if body.request_id:
+        body.request_id = _sr_visible(p, body.request_id)["request_id"]
+    w, created = S.ops.create(object_id=body.object_id.strip(), typ=body.type, description=body.description,
+                              priority=body.priority, source="智能体" if p.kind == "agent" else "平台", created_by=p.label,
+                              customer_id=body.customer_id.strip() if body.customer_id else None,
+                              request_id=body.request_id, auto_assign=body.auto_assign)
+    if body.request_id:
+        S.service.link(body.request_id, workorder_id=w["workorder_id"], by=p.label)
+    S.control._audit("workorder_create" if created else "workorder_duplicate", p.label, w["station_id"],
+                     {"workorder_id": w["workorder_id"], "type": w["type"], "priority": w["priority"]}, "ok")
+    warnings = ["描述中含指令性文字，已标记，仅作为工单描述保存：" + "、".join(w["flags"])] if w["flags"] else []
+    if not created:
+        return env({**w, "created": False}, f"该对象已有未完成的同类工单 {w['workorder_id']}（{w['status']}），未重复创建",
+                   warnings=warnings)
+    msg = f"已创建工单 {w['workorder_id']}（{w['type']}，{w['priority']}，应于 {w['due_at'][5:16].replace('T', ' ')} 前到场）"
+    msg += f"，已自动派给 {w['assignee_name']}" if w["assignee"] else "，待人工派单"
+    return env({**w, "created": True}, msg, warnings=warnings)
+
+
+@app.get("/api/ops/workorders/{wid}/suggest")
+def ops_suggest(wid: str, p: Principal = Depends(need("ops:read"))):
+    w = _wo_visible(p, wid)
+    r = S.ops.suggest(w["workorder_id"])
+    top = r["candidates"][0] if r["candidates"] else None
+    return env(r, f"推荐 {top['name']}（{top['team']}，评分 {top['score']}）" if top else "无在班维修人员",
+               evidence=[{"type": "method", "text": r["method"]}])
+
+
+@app.post("/api/ops/workorders/{wid}/assign")
+def ops_assign(wid: str, body: AssignBody, p: Principal = Depends(need("ops:write", human=True))):
+    w = _wo_visible(p, wid)
+    w = S.ops.assign(w["workorder_id"], body.staff_id, p.label)
+    S.control._audit("workorder_assign", p.label, w["station_id"], {"workorder_id": w["workorder_id"], "staff": body.staff_id}, "ok")
+    return env(w, f"已派给 {w['assignee_name']}")
+
+
+@app.post("/api/ops/workorders/{wid}/status")
+def ops_status(wid: str, body: StatusBody, p: Principal = Depends(need("ops:write", human=True))):
+    w = _wo_visible(p, wid)
+    w = S.ops.update_status(w["workorder_id"], body.status, p.label, body.result)
+    S.control._audit("workorder_status", p.label, w["station_id"], {"workorder_id": w["workorder_id"], "status": body.status}, "ok")
+    return env(w, f"工单 {w['workorder_id']} → {w['status']}")
+
+
+@app.get("/api/ops/staff")
+def ops_staff(p: Principal = Depends(need("ops:read"))):
+    return env(S.ops.staff)
+
+
+@app.post("/api/ops/patrol-plan")
+def ops_patrol(body: PatrolBody, p: Principal = Depends(need("ops:read"))):
+    r = S.ops.patrol_plan(stations=_stations(p, body.object_id), date=body.date, focus=body.focus, max_stops=body.max_stops)
+    return env(r, f"{r['date']} 巡检 {len(r['route'])} 站，约 {r['distance_km']} km、{r['est_hours']} 小时；"
+                  f"首站 {r['route'][0]['station_name'] if r['route'] else '无'}",
+               evidence=[{"type": "method", "text": r["method"]}],
+               warnings=[] if r["route"] else ["没有风险分 ≥1 的站，可改为常规巡检"])
+
+
+@app.get("/api/ops/handover")
+def ops_handover(shift_id: str | None = None, p: Principal = Depends(need("ops:read"))):
+    sts = set(p.visible_stations)
+    reqs = [r for r in S.service.requests.values() if r["station_id"] in sts or (r["station_id"] is None and p.is_global)]
+    r = S.ops.handover(shift_id, sts, set(p.visible_sources), weather_report(S.store, 48), reqs)
+    return env(r, r["summary"])
+
+
+@app.get("/api/ops/handoffs")
+def ops_handoffs(p: Principal = Depends(need("ops:read", "service:read", any_of=True))):
+    rows = sorted((h for h in S.ops.handoffs.values() if p.can_see(h["station_id"])), key=lambda h: h["created_at"], reverse=True)
+    return env(rows, f"未关闭移交 {sum(1 for h in rows if h['status'] != '已关闭')} 件")
+
+
+@app.post("/api/ops/handoffs/{hid}/status")
+def ops_handoff_status(hid: str, body: StatusBody, p: Principal = Depends(need("ops:write", human=True))):
+    h = S.ops.handoffs.get(hid.strip().upper())
+    if not h or not p.can_see(h["station_id"]):
+        raise OpsError("NOT_FOUND", f"移交 {hid} 不存在")
+    h = S.ops.update_handoff(h["handoff_id"], body.status, p.label, body.result)
+    S.control._audit("handoff_" + body.status, p.label, h["station_id"], {"handoff_id": h["handoff_id"]}, "ok")
+    return env(h, f"移交 {h['handoff_id']} → {h['status']}")
+
+
+# ================================================================ 客服
+class RequestBody(BaseModel):
+    text: str
+    channel: str = "热线"
+    customer_key: str | None = None
+
+
+class ClassifyBody(BaseModel):
+    text: str
+
+
+class HandoffBody(BaseModel):
+    summary: str = ""
+
+
+class NoteBody(BaseModel):
+    note: str = ""
+
+
+class NoticeBody(BaseModel):
+    kind: str
+    scope_id: str
+    reason: str = ""
+    start: str | None = None
+    end: str | None = None
+    send_now: bool = False
+
+
+class ConfirmBody(BaseModel):
+    approve: bool = True
+    comment: str = ""
+
+
+def _sr_visible(p: Principal, rid: str) -> dict:
+    r = S.service.get_request(rid.strip().upper())
+    if r["station_id"] and not p.can_see(r["station_id"]):
+        raise AuthError(403, "OUT_OF_SCOPE", "该诉求不在数据范围内")
+    if not r["station_id"] and not p.is_global:
+        raise AuthError(403, "OUT_OF_SCOPE", "未关联用户的诉求只对全网账号可见")
+    return r
+
+
+@app.get("/api/service/customers/lookup")
+def svc_customer(key: str, reveal: bool = False, p: Principal = Depends(need("service:read"))):
+    if reveal and not (p.has("customer:pii") and p.kind == "human"):
+        raise AuthError(403, "PII_FORBIDDEN", "查看完整姓名与电话需要人工会话且具有 customer:pii 权限")
+    v = S.service.customer_360(key, stations=set(p.visible_stations), reveal=reveal)
+    if reveal:
+        S.control._audit("pii_reveal", p.label, v["station"]["station_id"], {"customer_id": v["customer"]["customer_id"]}, "ok")
+    return env(v, f"{v['customer']['address']}：{v['station']['name']}，" + ("；".join(v["facts"]) or "运行正常"),
+               confidence="估算" if v["room_temp_est"] is not None else None,
+               warnings=["室温为按站典型室温与户位置估算的值，不是该户实测"] if v["room_temp_est"] is not None else [])
+
+
+@app.post("/api/service/classify")
+def svc_classify(body: ClassifyBody, p: Principal = Depends(need("service:read"))):
+    r = classify_request(body.text)
+    return env(r, f"{r['category']}{'（紧急）' if r['urgent'] else ''}{'，建议转人工' if r['human'] else ''}")
+
+
+@app.post("/api/service/requests")
+def svc_register(body: RequestBody, p: Principal = Depends(need("service:write"))):
+    r = S.service.register(body.text, channel=body.channel, customer_key=body.customer_key, by=p.label,
+                           stations=set(p.visible_stations))
+    cls = r["classification"]
+    S.control._audit("service_request", p.label, r["station_id"] or "-",
+                     {"request_id": r["request_id"], "category": cls["category"], "urgent": cls["urgent"]}, "merged" if r["merged"] else "ok")
+    warnings = []
+    if cls["injection_flags"]:
+        warnings.append("诉求文本含指令性内容（" + "、".join(cls["injection_flags"]) + "），只作为用户原话记录，不得执行")
+    if cls["confidence"] == "低":
+        warnings.append("规则分类器未识别出业务类别，已送人工复核")
+    head = f"诉求 {r['request_id']}{'（1 小时内重复来电，已合并）' if r['merged'] else ''}：{cls['category']}"
+    head += "，紧急" if cls["urgent"] else ""
+    head += "，转人工" if cls["human"] else ""
+    return env(r, head, warnings=warnings, confidence=cls["confidence"],
+               evidence=[{"type": "rule", "text": x} for x in cls["reasons"] + cls["human_reasons"]])
+
+
+@app.get("/api/service/requests")
+def svc_requests(status: str | None = None, days: int = Query(7, ge=1, le=60), p: Principal = Depends(need("service:read"))):
+    r = S.service.list_requests(stations=set(p.visible_stations), status=status or None, days=days)
+    if not p.is_global:
+        r["requests"] = [x for x in r["requests"] if x["station_id"]]
+    return env(r, f"近 {days} 天诉求 {r['total']} 件，紧急 {r['urgent']} 件，转人工 {r['human']} 件")
+
+
+@app.get("/api/service/requests/{rid}")
+def svc_request(rid: str, p: Principal = Depends(need("service:read"))):
+    return env(_sr_visible(p, rid))
+
+
+@app.post("/api/service/requests/{rid}/reply-draft")
+def svc_reply(rid: str, p: Principal = Depends(need("service:write"))):
+    r = _sr_visible(p, rid)
+    d = S.service.draft_reply(r["request_id"], stations=set(p.visible_stations), by=p.label)
+    return env(d, "回复草稿已生成，须客服确认后人工发送", warnings=d["cautions"],
+               evidence=[{"type": "doc", "text": f"{c['doc_id']} {c['section']}"} for c in d["citations"]])
+
+
+@app.post("/api/service/requests/{rid}/handoff")
+def svc_handoff(rid: str, body: HandoffBody, p: Principal = Depends(need("service:write"))):
+    r = _sr_visible(p, rid)
+    if not r["station_id"]:
+        raise OpsError("NO_CUSTOMER", "诉求未关联用户，无法确定楼栋，请先核实地址")
+    summary = body.summary.strip() or f"{S.ops.md.buildings[r['building_id']]['name']}用户反映：{r['text'][:80]}"
+    h = S.ops.handoff(station_id=r["station_id"], building_id=r["building_id"], summary=summary, request_id=r["request_id"], by=p.label)
+    S.service.link(r["request_id"], handoff_id=h["handoff_id"], by=p.label)
+    S.control._audit("handoff_create", p.label, r["station_id"], {"handoff_id": h["handoff_id"], "request_id": r["request_id"]}, "ok")
+    return env(h, f"已移交调度（{h['handoff_id']}，关联诉求 {len(h['related_requests'])} 件），等待调度接收")
+
+
+@app.post("/api/service/requests/{rid}/close")
+def svc_close(rid: str, body: NoteBody, p: Principal = Depends(need("service:write", human=True))):
+    r = _sr_visible(p, rid)
+    return env(S.service.close_request(r["request_id"], p.label, body.note), "诉求已办结")
+
+
+@app.get("/api/service/notices")
+def svc_notices(p: Principal = Depends(need("service:read"))):
+    rows = S.service.list_notices(stations=set(p.visible_stations))
+    return env(rows, f"待确认通知 {sum(1 for n in rows if n['status'] == '待确认')} 条")
+
+
+@app.post("/api/service/notices")
+def svc_notice(body: NoticeBody, p: Principal = Depends(need("service:notify"))):
+    n = S.service.create_notice(kind=body.kind, scope_id=body.scope_id.strip(), reason=body.reason, start=body.start, end=body.end,
+                                by=p.label, actor_kind=p.kind, stations=set(p.visible_stations))
+    if n.get("duplicate"):
+        return env(n, f"1 小时内已有同类通知 {n['notice_id']}（{n['status']}），未重复创建")
+    S.control._audit("notice_create", p.label, body.scope_id, {"notice_id": n["notice_id"], "kind": n["kind"],
+                                                               "recipients": n["recipients"]}, "pending")
+    if body.send_now and p.kind == "human":
+        n = S.service.confirm_notice(n["notice_id"], p.label)
+        S.control._audit("notice_send", p.label, body.scope_id, {"notice_id": n["notice_id"]}, "sent")
+        return env(n, f"已发送 {n['kind']}通知：送达 {n['delivery']['delivered']} 户，失败 {n['delivery']['failed']} 户",
+                   warnings=n["warnings"])
+    extra = "智能体发起的通知须由客服人工确认后才会发送" if p.kind == "agent" else "请确认后发送"
+    return env(n, f"{n['kind']}通知已生成（{n['notice_id']}，{n['recipients']} 户），{extra}", warnings=n["warnings"])
+
+
+@app.post("/api/service/notices/{nid}/confirm")
+def svc_notice_confirm(nid: str, body: ConfirmBody, p: Principal = Depends(need("service:notify", human=True))):
+    nid = nid.strip().upper()
+    if not any(n["notice_id"] == nid for n in S.service.list_notices(stations=set(p.visible_stations))):
+        raise OpsError("NOT_FOUND", f"通知 {nid} 不存在")
+    n = S.service.confirm_notice(nid, p.label, body.approve, body.comment)
+    S.control._audit("notice_send" if body.approve else "notice_reject", p.label, n["scope_id"], {"notice_id": nid}, n["status"])
+    return env(n, f"已发送：送达 {n['delivery']['delivered']} 户，失败 {n['delivery']['failed']} 户（失败的转人工外呼）"
+               if body.approve else "通知已驳回")
 
 
 @app.get("/api/health")

@@ -69,13 +69,13 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Bell, DataBoard, Key, MagicStick, OfficeBuilding, Operation, Reading, Sunny, TrendCharts, UserFilled } from '@element-plus/icons-vue'
+import { Bell, DataBoard, Headset, Key, MagicStick, OfficeBuilding, Operation, Reading, SetUp, Sunny, TrendCharts, UserFilled } from '@element-plus/icons-vue'
 import { menus } from './router'
 import { useAuth } from './stores/auth'
 import { useRealtime } from './stores/realtime'
 import { fmt } from './utils/format'
 
-const icons: Record<string, any> = { DataBoard, Sunny, OfficeBuilding, TrendCharts, MagicStick, Operation, Bell, Key, Reading }
+const icons: Record<string, any> = { DataBoard, Sunny, OfficeBuilding, TrendCharts, MagicStick, Operation, Bell, SetUp, Headset, Key, Reading }
 const rt = useRealtime()
 const auth = useAuth()
 const route = useRoute()

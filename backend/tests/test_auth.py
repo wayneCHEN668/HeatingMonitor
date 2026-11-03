@@ -119,7 +119,7 @@ def test_agent_tokens(tc):
     r = tc.post("/api/auth/agent-tokens", headers=H(d), json={"agent": "调度智能体", "profile": "dispatch", "days": 500})
     rec = r.json()["data"]["record"]
     assert rec["permissions"] == sorted({"monitor:read", "analytics:read", "ai:read", "control:draft", "control:execute",
-                                         "kb:read", "kb:write"})
+                                         "kb:read", "kb:write", "ops:read", "service:read"})
     agent = r.json()["data"]["token"]
     # 智能体不能再签发 / 管理委托令牌
     assert tc.post("/api/auth/agent-tokens", headers=H(agent), json={"profile": "analyst"}).status_code == 403

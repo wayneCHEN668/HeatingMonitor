@@ -99,6 +99,12 @@
     <DTag :x="300" :y="530" label="补水量" :value="fixed(d.makeup_tph, 2)" unit="t/h" :w="128" />
     <DTag :x="434" :y="530" label="负荷率" :value="fixed(d.load_pct)" unit="%" :w="128"
           :color="d.load_pct > 90 ? '#ef4444' : d.load_pct > 75 ? '#f5a524' : '#22c55e'" />
+    <!-- 可视化高亮（viz_render twin） -->
+    <g v-for="h in hlBoxes" :key="h.key" class="hl" :class="hlLevel">
+      <rect :x="h.x" :y="h.y" :width="h.w" :height="h.h" rx="8" class="hl-box" />
+      <rect :x="h.x" :y="h.y - 20" :width="h.label.length * 13 + 10" height="18" rx="3" class="hl-tag" />
+      <text :x="h.x + 5" :y="h.y - 6" class="hl-lbl">{{ h.label }}</text>
+    </g>
   </svg>
 </template>
 
@@ -110,7 +116,7 @@ import { fixed } from './svgParts'
 import DTag from './DTag.vue'
 import DPump from './DPump.vue'
 
-const props = defineProps<{ d: SourceRT }>()
+const props = defineProps<{ d: SourceRT; highlight?: string[]; hlLevel?: string }>()
 const pumps = computed(() => props.d.units.filter((u) => u.type === 'pump'))
 const units = computed(() => props.d.units.filter((u) => u.type !== 'pump'))
 const pumpXs = computed(() => pumps.value.map((_, i) => 136 + i * 78))
@@ -119,6 +125,16 @@ const unitXs = computed(() => {
   const x0 = 470
   const x1 = 900
   return units.value.map((_, i) => (n === 1 ? (x0 + x1) / 2 : x0 + ((x1 - x0) * i) / (n - 1)))
+})
+const hlBoxes = computed(() => {
+  const xs = unitXs.value, ps = pumpXs.value
+  const box: Record<string, { x: number; y: number; w: number; h: number; label: string }> = {
+    energy: { x: 142, y: 104, w: 246, h: 52, label: '能源输入' },
+    units: { x: (xs[0] ?? 470) - 72, y: 150, w: (xs[xs.length - 1] ?? 900) - (xs[0] ?? 470) + 144, h: 192, label: '热源机组' },
+    pumps: { x: (ps[0] ?? 136) - 34, y: 404, w: (ps[ps.length - 1] ?? 136) - (ps[0] ?? 136) + 110, h: 66, label: '循环泵' },
+    makeup: { x: 30, y: 326, w: 80, h: 166, label: '补水系统' },
+  }
+  return (props.highlight ?? []).filter((k) => box[k]).map((k) => ({ key: k, ...box[k] }))
 })
 const cs = computed(() => pipeColor('supply', props.d.ts1, 60, 120))
 const cr = computed(() => pipeColor('return', props.d.tr1, 25, 60))
@@ -145,4 +161,12 @@ const energy = computed(() => {
 .kv { font-size: 11px; fill: #8797b3; }
 .sv { font-size: 11px; font-weight: 700; font-family: ui-monospace, monospace; }
 .big { font-size: 20px; fill: #fff; font-weight: 700; font-family: ui-monospace, monospace; }
+.hl-box { fill: rgba(59, 140, 255, .08); stroke: #3b8cff; stroke-width: 3; stroke-dasharray: 8 5; animation: viz-dash 1.2s linear infinite; }
+.hl.warn .hl-box { stroke: #f5a524; fill: rgba(245, 165, 36, .08); }
+.hl.danger .hl-box { stroke: #ef4444; fill: rgba(239, 68, 68, .1); }
+.hl-lbl { font-size: 12px; font-weight: 700; fill: #fff; }
+.hl-tag { fill: #3b8cff; }
+.hl.warn .hl-tag { fill: #b7791f; }
+.hl.danger .hl-tag { fill: #b91c1c; }
+@keyframes viz-dash { to { stroke-dashoffset: -26; } }
 </style>

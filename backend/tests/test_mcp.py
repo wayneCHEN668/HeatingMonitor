@@ -71,7 +71,7 @@ def test_tool_catalog_dispatch(tc):
 
     tools = run(tc, tc.agent["disp"], s)
     by = {t.name: t for t in tools}
-    assert len(tools) == 26          # 20 个监控/分析/调控/知识库工具 + 4 个运维只读/计算 + 用户 360 + 报告生成
+    assert len(tools) == 27          # 20 个监控/分析/调控/知识库工具 + 4 个运维只读/计算 + 用户 360 + 报告生成 + 可视化
     assert all(re.fullmatch(r"[a-z0-9_]+", n) for n in by)
     assert not any("approve" in n for n in by)
     assert by["control_execute"].annotations.destructive_hint is True
@@ -83,11 +83,11 @@ def test_permission_intersection(tc):
     analyst = run(tc, tc.agent["analyst"], names)
     zhao = run(tc, tc.agent["zhao"], names)          # dispatch 档案 ∩ 站长权限 = 无调控
     service = run(tc, tc.agent["service"], names)    # 客服只有监控权限
-    assert len(analyst) == 13 and "doc_generate_report" in analyst and not any(n.startswith("control_") for n in analyst)
+    assert len(analyst) == 14 and {"doc_generate_report", "viz_render"} <= analyst and not any(n.startswith("control_") for n in analyst)
     assert "kb_search" in analyst and "kb_save_case" not in analyst             # 分析智能体只读知识库
     assert not any(n.startswith("control_") for n in zhao)
     assert service == {"data_search_objects", "data_get_realtime", "data_get_timeseries_summary",
-                       "data_get_alarms", "data_get_weather", "kb_search", "kb_find_similar_cases"}
+                       "data_get_alarms", "data_get_weather", "kb_search", "kb_find_similar_cases", "viz_render"}
 
 
 def test_human_session_rejected_for_mcp(tc):

@@ -36,6 +36,7 @@ from .services.kb import KnowledgeBase
 from .services.ops import PRIORITY_SLA_H, WO_TYPES, MasterData, OpsError, OpsService
 from .services.reports import CONTENT_PERMS, DEDUPE_MIN, REPORT_TYPES, ReportError, ReportService
 from .services.service_desk import NOTICE_KINDS, ServiceDesk, classify_request
+from .services.viz import COLOR_BY, DATA_REF_FORMS, SOURCE_PARTS, STATION_PARTS, Viewer, VizError, VizService
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
 from .sim.realtime import Engine
@@ -89,6 +90,7 @@ class State:
     ops: OpsService
     service: ServiceDesk
     reports: ReportService
+    viz: VizService
     clients: dict[WebSocket, str]          # 连接 -> 令牌（每次推送前重新校验）
 
 
@@ -256,6 +258,7 @@ async def lifespan(app: FastAPI):
         for k, v in S.breaker.summary().items() if v["state"] == "tripped"])
     S.ops = OpsService(S.engine, S.control, S.ai, S.kb, S.breaker, MasterData())
     S.service = ServiceDesk(S.ops, S.kb, S.engine, S.control)
+    S.viz = VizService(S.store, S.ai, S.analytics)
     S.reports = ReportService(S.analytics, S.ai, S.engine, S.control, S.breaker, S.ops, S.service, S.kb)
     S.clients = {}
     task = asyncio.create_task(ticker())
@@ -294,6 +297,11 @@ async def ops_error(_: Request, e: OpsError):
 @app.exception_handler(ReportError)
 async def report_error(_: Request, e: ReportError):
     return fail({"NOT_FOUND": 404, "OUT_OF_SCOPE": 403}.get(e.code, 400), e.code, e.message)
+
+
+@app.exception_handler(VizError)
+async def viz_error(_: Request, e: VizError):
+    return fail({"NOT_FOUND": 404, "OUT_OF_SCOPE": 403, "FORBIDDEN": 403}.get(e.code, 400), e.code, e.message)
 
 
 @app.exception_handler(ValueError)
@@ -1277,6 +1285,63 @@ def report_review(rid: str, body: ReviewBody, p: Principal = Depends(need("repor
     r = S.reports.review(r["report_id"], by=p.label, approve=body.approve, conclusion=body.conclusion)
     S.control._audit("report_review", p.label, r["scope_id"], {"report_id": r["report_id"], "approve": body.approve}, r["status"])
     return env(_report_meta(r), f"报告 {r['report_id']} {r['status']}")
+
+
+# ================================================================ 可视化（viz_render）
+class VizBody(BaseModel):
+    mode: str
+    title: str = ""
+    spec: dict = Field(default_factory=dict)
+
+
+class PinBody(BaseModel):
+    pinned: bool = True
+
+
+def _viewer(p: Principal) -> Viewer:
+    return Viewer(p.sources, p.can_see, p.has, lambda: scoped_snapshot(p))
+
+
+def _viz_meta(r: dict) -> dict:
+    return {**{k: r.get(k) for k in ("viz_id", "mode", "title", "created_by", "actor_kind", "created_at", "pinned")},
+            "description": S.viz.describe(r), "link": f"/viz/{r['viz_id']}"}
+
+
+@app.get("/api/viz/meta")
+def viz_meta(p: Principal = Depends(need("monitor:read"))):
+    return env({"data_refs": DATA_REF_FORMS, "color_by": {k: v[0] for k, v in COLOR_BY.items()},
+                "station_parts": STATION_PARTS, "source_parts": SOURCE_PARTS})
+
+
+@app.post("/api/viz")
+def viz_create(body: VizBody, p: Principal = Depends(need("monitor:read"))):
+    rec = S.viz.create(mode=body.mode, title=body.title, spec=body.spec, v=_viewer(p), owner=p.username, by=p.label,
+                       actor_kind=p.kind)
+    return env(_viz_meta(rec), f"已生成：{S.viz.describe(rec)}；打开 /viz/{rec['viz_id']} 查看，可固定到工作台")
+
+
+@app.get("/api/viz")
+def viz_list(p: Principal = Depends(need("monitor:read"))):
+    rows = [_viz_meta(r) for r in S.viz.list(p.username)]
+    return env(rows, f"已固定 {sum(1 for r in rows if r['pinned'])} 个，共 {len(rows)} 个")
+
+
+@app.get("/api/viz/{vid}")
+def viz_get(vid: str, p: Principal = Depends(need("monitor:read"))):
+    rec = S.viz.get(vid.strip().upper(), p.username)
+    return env(S.viz.render(rec, _viewer(p)) | {"description": S.viz.describe(rec)})
+
+
+@app.post("/api/viz/{vid}/pin")
+def viz_pin(vid: str, body: PinBody, p: Principal = Depends(need("monitor:read", human=True))):
+    rec = S.viz.pin(vid.strip().upper(), p.username, body.pinned)
+    return env(_viz_meta(rec), "已固定到工作台" if rec["pinned"] else "已从工作台移除")
+
+
+@app.delete("/api/viz/{vid}")
+def viz_delete(vid: str, p: Principal = Depends(need("monitor:read", human=True))):
+    S.viz.delete(vid.strip().upper(), p.username)
+    return env({"deleted": True}, "已删除")
 
 
 @app.get("/api/health")

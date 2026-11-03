@@ -99,6 +99,13 @@
           :color="d.makeup_tph > 0.5 ? '#ef4444' : undefined" />
     <DTag :x="852" :y="466" :w="140" label="典型室温" :value="fixed(d.tin)" unit="℃" :color="tinColor" />
 
+    <!-- 可视化高亮（viz_render twin） -->
+    <g v-for="h in hlBoxes" :key="h.key" class="hl" :class="hlLevel">
+      <rect :x="h.x" :y="h.y" :width="h.w" :height="h.h" rx="8" class="hl-box" />
+      <rect :x="h.x" :y="h.y - 20" :width="h.label.length * 13 + 10" height="18" rx="3" class="hl-tag" />
+      <text :x="h.x + 5" :y="h.y - 6" class="hl-lbl">{{ h.label }}</text>
+    </g>
+
     <g v-if="!d.online">
       <rect x="0" y="0" width="1000" height="520" fill="#0a1120" opacity=".55" />
       <text x="500" y="260" text-anchor="middle" class="offline blink">通讯中断 · 显示最后一次数据</text>
@@ -115,7 +122,17 @@ import DTag from './DTag.vue'
 import DPump from './DPump.vue'
 import DValve from './DValve.vue'
 
-const props = defineProps<{ d: StationRT }>()
+const props = defineProps<{ d: StationRT; highlight?: string[]; hlLevel?: string }>()
+// 部件包围框（与上方 SVG 布局坐标一致）
+const PARTS: Record<string, { x: number; y: number; w: number; h: number; label: string }> = {
+  valve: { x: 156, y: 70, w: 70, h: 70, label: '电动调节阀' },
+  hx: { x: 310, y: 140, w: 132, h: 240, label: '板式换热器' },
+  heat_meter: { x: 178, y: 400, w: 44, h: 40, label: '热量表' },
+  pump: { x: 528, y: 392, w: 120, h: 126, label: '循环泵' },
+  makeup: { x: 680, y: 214, w: 96, h: 186, label: '补水系统' },
+  building: { x: 848, y: 130, w: 150, h: 290, label: '用户楼栋' },
+}
+const hlBoxes = computed(() => (props.highlight ?? []).filter((k) => PARTS[k]).map((k) => ({ key: k, ...PARTS[k] })))
 const c = computed(() => ({
   ts1: pipeColor('supply', props.d.ts1, 60, 120),
   tr1: pipeColor('return', props.d.tr1, 25, 60),
@@ -139,4 +156,12 @@ const flowCls = (g: number) => (!props.d.online || g < 0.5 ? 'stop' : '')
 .m { font-size: 10px; fill: #9fb4d8; font-weight: 700; }
 .q { font-size: 13px; fill: #ffd166; font-weight: 700; font-family: ui-monospace, monospace; }
 .offline { font-size: 26px; fill: #ef4444; font-weight: 700; }
+.hl-box { fill: rgba(59, 140, 255, .08); stroke: #3b8cff; stroke-width: 3; stroke-dasharray: 8 5; animation: viz-dash 1.2s linear infinite; }
+.hl.warn .hl-box { stroke: #f5a524; fill: rgba(245, 165, 36, .08); }
+.hl.danger .hl-box { stroke: #ef4444; fill: rgba(239, 68, 68, .1); }
+.hl-lbl { font-size: 12px; font-weight: 700; fill: #fff; }
+.hl-tag { fill: #3b8cff; }
+.hl.warn .hl-tag { fill: #b7791f; }
+.hl.danger .hl-tag { fill: #b91c1c; }
+@keyframes viz-dash { to { stroke-dashoffset: -26; } }
 </style>

@@ -43,6 +43,7 @@ TOOL_PERM = {
     "service_draft_reply": "service:write", "service_send_notice": "service:notify",
     "service_handoff_to_dispatch": "service:write",
     "doc_generate_report": "report:write",
+    "viz_render": "monitor:read",
 }
 
 INSTRUCTIONS = """你连接的是城市集中供热热网监控系统，只能看到并操作数据范围内的热源（HSxx）和热力站（STxx）。
@@ -63,7 +64,9 @@ INSTRUCTIONS = """你连接的是城市集中供热热网监控系统，只能�
    用户姓名电话只给你脱敏值，不要尝试获取完整信息。回复草稿和通知都要人工确认后才会发给用户，不要对用户说“已发送”。
 8. 同楼栋多户报不热时用 service_handoff_to_dispatch 移交调度，不要逐户派维修工单；客服智能体不能调控。
 9. 用户要日报、周报、节能报告时调用 doc_generate_report，把返回的链接和关键结论告诉用户；转述报告时只引用
-   key_findings 里的数字，不要自行计算或改写数值。事故报告需要人工（审计权限）生成和审核。"""
+   key_findings 里的数字，不要自行计算或改写数值。事故报告需要人工（审计权限）生成和审核。
+10. 需要画图或在管网/工艺图上指给用户看时调用 viz_render：图表只填 data_ref（来自其他工具的返回）和字段名，
+   不要把数值抄进参数；把返回的链接给用户，提示可以固定到工作台。"""
 
 
 class ToolError(TypedDict):
@@ -727,6 +730,51 @@ def build_server(api: HeatnetAPI, *, audit: bool = True, client_label: str = "")
                                                         "key_findings", "link", "html_url", "numbers_checked", "fingerprint", "reused")},
                         evidence=[e["text"] for e in r.get("evidence", [])] + ["数字核对：正文全部数字可追溯到计算结果"],
                         warnings=r["warnings"])
+
+    # ================================================================ 可视化
+    @tool("viz_render", "R0", "生成图表或定位高亮", idempotent=False)
+    def viz_render(
+        mode: Annotated[Literal["chart", "map", "twin"], Field(description="chart 图表 / map 管网拓扑高亮 / twin 工艺图部件高亮")],
+        title: Annotated[str, Field(max_length=60, description="标题")] = "",
+        data_ref: Annotated[str | None, Field(description="chart：其他工具返回的 data_ref，例如 /api/history/ST02?hours=72&metrics=tin,ts2、"
+                                                          "/api/ai/forecast?scope=NET&horizon=72、/api/analytics/energy?days=7&view=stations、"
+                                                          "/api/realtime")] = None,
+        fields: Annotated[list[str] | None, Field(description="chart：要画的字段，如 [\"tin\",\"ts2\"]、[\"actual\",\"p50\",\"p90\"]、[\"saving_rate\"]")] = None,
+        chart_type: Annotated[Literal["line", "bar", "area", "scatter"], Field()] = "line",
+        right_axis_fields: Annotated[list[str] | None, Field(description="chart：放到右侧坐标轴的字段（量纲不同时用）")] = None,
+        series: Annotated[list[dict] | None, Field(description="chart：多个数据集对比时使用，每项 {data_ref, field, name?, axis?}；"
+                                                               "与 data_ref/fields 二选一")] = None,
+        mark_lines: Annotated[list[dict] | None, Field(description="chart：参考线，每项 {value, label?}，如 [{\"value\":18,\"label\":\"室温下限\"}]")] = None,
+        object_ids: Annotated[list[str] | None, Field(description="map：要高亮的热源/热力站 ID；twin：取第一个")] = None,
+        color_by: Annotated[Literal["alarm", "tin", "heat_mw", "ts2", "valve", "makeup_tph"] | None,
+                            Field(description="map：站点着色依据，默认报警状态")] = None,
+        parts: Annotated[list[str] | None, Field(description="twin：要高亮的部件。热力站 valve/hx/heat_meter/pump/makeup/building；"
+                                                             "热源 energy/units/pumps/makeup")] = None,
+        note: Annotated[str | None, Field(max_length=200, description="map/twin：显示在高亮旁的说明")] = None,
+        level: Annotated[Literal["info", "warn", "danger"], Field()] = "info",
+    ) -> Envelope:
+        """生成前端渲染指令并保存为可视化，返回打开链接。数据不经过你：图表只给 data_ref 和字段名，平台在用户打开时
+        用用户自己的权限和数据范围取最新数据重绘，所以不要把数值写进参数（也不接受）。map 在管网拓扑图上高亮对象并可按
+        室温、负荷等着色；twin 在热源/热力站工艺图上高亮部件（如补水系统、调节阀）。用户可把结果固定到工作台。"""
+        if mode == "chart":
+            if series:
+                ser = series
+            elif data_ref and fields:
+                right = set(right_axis_fields or [])
+                ser = [{"data_ref": data_ref, "field": f, "axis": "right" if f in right else "left"} for f in fields]
+            else:
+                raise ValueError("chart 需要 data_ref + fields，或 series")
+            spec = {"type": chart_type, "series": ser, **({"mark_lines": mark_lines} if mark_lines else {})}
+        elif mode == "map":
+            spec = {"object_ids": object_ids or [], "color_by": color_by or "alarm", "note": note or "", "level": level}
+        else:
+            if not object_ids:
+                raise ValueError("twin 需要 object_ids（一个热源或热力站 ID）")
+            spec = {"object_id": object_ids[0], "parts": parts or [], "note": note or "", "level": level}
+        r = api.post("/api/viz", {"mode": mode, "title": title, "spec": spec})
+        d = r["data"]
+        return envelope(r["summary"], {k: d[k] for k in ("viz_id", "mode", "title", "description", "link")},
+                        evidence=["数据由平台按查看者权限实时取数，未经模型"])
 
     # ================================================================ 调控执行（仅调度智能体）
     @tool("control_get_autonomy_policy", "R0", "查询自治等级与安全边界")

@@ -4,6 +4,7 @@ import { useAuth } from '@/stores/auth'
 /** perm：进入该页面需要的权限（任一）；没有权限的菜单不显示 */
 export const menus = [
   { path: '/overview', title: '全网总览', icon: 'DataBoard', perm: ['monitor:read'] },
+  { path: '/workbench', title: '我的工作台', icon: 'Grid', perm: ['monitor:read'] },
   { path: '/sources', title: '热源监控', icon: 'Sunny', perm: ['monitor:read'] },
   { path: '/stations', title: '热力站监控', icon: 'OfficeBuilding', perm: ['monitor:read'] },
   { path: '/analytics', title: '统计分析', icon: 'TrendCharts', perm: ['analytics:read'] },
@@ -37,6 +38,8 @@ const router = createRouter({
     { path: '/service', component: () => import('@/views/Service.vue'), meta: { title: '客服中心' } },
     { path: '/reports', component: () => import('@/views/Reports.vue'), meta: { title: '报告中心' } },
     { path: '/reports/:id', component: () => import('@/views/Reports.vue'), meta: { title: '报告' } },
+    { path: '/workbench', component: () => import('@/views/Workbench.vue'), meta: { title: '我的工作台' } },
+    { path: '/viz/:id', component: () => import('@/views/Viz.vue'), meta: { title: '可视化' } },
     { path: '/kb', component: () => import('@/views/KnowledgeBase.vue'), meta: { title: '知识库' } },
     { path: '/agents', component: () => import('@/views/AgentTokens.vue'), meta: { title: '智能体授权' } },
     { path: '/forbidden', component: () => import('@/views/Forbidden.vue'), meta: { title: '无权访问' } },

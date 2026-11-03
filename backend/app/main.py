@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from .auth import AGENT_PROFILES, PERMISSIONS, ROLES, AuthError, AuthService, Principal
@@ -34,6 +34,7 @@ from .services.control import ControlError, ControlService
 from .services.embedding import load_embedder
 from .services.kb import KnowledgeBase
 from .services.ops import PRIORITY_SLA_H, WO_TYPES, MasterData, OpsError, OpsService
+from .services.reports import REPORT_TYPES, ReportError, ReportService
 from .services.service_desk import NOTICE_KINDS, ServiceDesk, classify_request
 from .services.weather_svc import weather_report
 from .sim.history import HistoryStore, now_local
@@ -87,6 +88,7 @@ class State:
     breaker: CircuitBreaker
     ops: OpsService
     service: ServiceDesk
+    reports: ReportService
     clients: dict[WebSocket, str]          # 连接 -> 令牌（每次推送前重新校验）
 
 
@@ -254,6 +256,7 @@ async def lifespan(app: FastAPI):
         for k, v in S.breaker.summary().items() if v["state"] == "tripped"])
     S.ops = OpsService(S.engine, S.control, S.ai, S.kb, S.breaker, MasterData())
     S.service = ServiceDesk(S.ops, S.kb, S.engine, S.control)
+    S.reports = ReportService(S.analytics, S.ai, S.engine, S.control, S.breaker, S.ops, S.service, S.kb)
     S.clients = {}
     task = asyncio.create_task(ticker())
     threading.Thread(target=warmup, daemon=True).start()
@@ -285,6 +288,11 @@ async def breaker_error(_: Request, e: BreakerError):
 
 @app.exception_handler(OpsError)
 async def ops_error(_: Request, e: OpsError):
+    return fail({"NOT_FOUND": 404, "OUT_OF_SCOPE": 403}.get(e.code, 400), e.code, e.message)
+
+
+@app.exception_handler(ReportError)
+async def report_error(_: Request, e: ReportError):
     return fail({"NOT_FOUND": 404, "OUT_OF_SCOPE": 403}.get(e.code, 400), e.code, e.message)
 
 
@@ -1171,6 +1179,101 @@ def svc_notice_confirm(nid: str, body: ConfirmBody, p: Principal = Depends(need(
     S.control._audit("notice_send" if body.approve else "notice_reject", p.label, n["scope_id"], {"notice_id": nid}, n["status"])
     return env(n, f"已发送：送达 {n['delivery']['delivered']} 户，失败 {n['delivery']['failed']} 户（失败的转人工外呼）"
                if body.approve else "通知已驳回")
+
+
+# ================================================================ 报告
+class ReportBody(BaseModel):
+    report_type: str
+    scope_id: str = "NET"
+    period: str | None = None
+    event_id: str | None = None
+    force: bool = False
+
+
+class ReviewBody(BaseModel):
+    approve: bool = True
+    conclusion: str = ""
+
+
+def _report_visible(p: Principal, r: dict) -> bool:
+    """报告是数据快照：只有能看到报告覆盖的全部对象的人才能看；事故报告含审计记录，另需 audit:read。"""
+    if r["type"] == "incident" and not p.has("audit:read"):
+        return False
+    sid = r["scope_id"]
+    if sid in STATION_BY_ID or sid in SOURCE_BY_ID:
+        return p.can_see(sid)
+    srcs = r["_key"][3]
+    return p.is_global if srcs is None else set(srcs) <= set(p.visible_sources)
+
+
+def _report_meta(r: dict) -> dict:
+    return {**{k: r.get(k) for k in ("report_id", "type", "type_name", "title", "scope_id", "scope_name", "generated_at",
+                                      "generated_by", "actor_kind", "status", "key_findings", "fingerprint", "event_id")},
+            "period": r["period"]["label"], "check_ok": r["check"]["ok"], "numbers_checked": r["check"]["numbers_checked"],
+            "link": f"/reports/{r['report_id']}", "html_url": f"/api/reports/{r['report_id']}/html"}
+
+
+def _get_report(p: Principal, rid: str) -> dict:
+    r = S.reports.get(rid.strip().upper())
+    if not _report_visible(p, r):
+        raise AuthError(403, "OUT_OF_SCOPE", "该报告超出您的数据范围或权限")
+    return r
+
+
+@app.get("/api/reports/meta")
+def report_meta(p: Principal = Depends(need("report:read"))):
+    return env({"types": REPORT_TYPES, "can_incident": p.has("audit:read") and p.has("report:write")})
+
+
+@app.get("/api/reports")
+def report_list(type: str | None = None, p: Principal = Depends(need("report:read"))):
+    rows = sorted((r for r in S.reports.reports.values() if _report_visible(p, r) and (not type or r["type"] == type)),
+                  key=lambda r: r["generated_at"], reverse=True)
+    return env([_report_meta(r) for r in rows[:200]], f"共 {len(rows)} 份报告")
+
+
+@app.post("/api/reports")
+def report_generate(body: ReportBody, p: Principal = Depends(need("report:write"))):
+    if body.report_type == "incident":
+        if not (p.has("audit:read") and p.has("monitor:read")):
+            raise AuthError(403, "FORBIDDEN", "事故报告包含审计记录，需要 audit:read 权限（值班调度长/管理员）")
+        scope = "NET"
+    else:
+        if not p.has("analytics:read"):
+            raise AuthError(403, "FORBIDDEN", f"{p.label} 没有权限：{PERMISSIONS['analytics:read']}")
+        scope = see(p, body.scope_id)
+    t0 = time.time()
+    r = S.reports.generate(rtype=body.report_type, scope=scope, period=body.period, event_id=body.event_id,
+                           sources=p.sources, by=p.label, actor_kind=p.kind, can_see=p.can_see, has=p.has, force=body.force)
+    if not r["reused"]:
+        S.control._audit("report_generate", p.label, r["scope_id"], {"report_id": r["report_id"], "type": r["type"],
+                                                                    "period": r["period"]["label"]}, "ok")
+    meta = _report_meta(r)
+    msg = (f"{r['title']}：{'复用 10 分钟内已生成的同一报告' if r['reused'] else '已生成'}，"
+           f"正文 {r['check']['numbers_checked']} 个数字全部核对通过（{time.time() - t0:.1f}s）")
+    return env({**meta, "reused": r["reused"], "warnings": r["warnings"]}, msg, warnings=r["warnings"],
+               evidence=[{"type": "fingerprint", "text": f"数据指纹 {r['fingerprint']}"}])
+
+
+@app.get("/api/reports/{rid}")
+def report_get(rid: str, p: Principal = Depends(need("report:read"))):
+    r = _get_report(p, rid)
+    return env({k: v for k, v in r.items() if k != "_key"} | {"link": f"/reports/{r['report_id']}"})
+
+
+@app.get("/api/reports/{rid}/html", response_class=HTMLResponse)
+def report_html(rid: str, p: Principal = Depends(need("report:read"))):
+    r = _get_report(p, rid)
+    return HTMLResponse(S.reports.render_html(r), headers={
+        "Content-Disposition": f"inline; filename={r['report_id']}.html", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:"})
+
+
+@app.post("/api/reports/{rid}/review")
+def report_review(rid: str, body: ReviewBody, p: Principal = Depends(need("report:review", human=True))):
+    r = _get_report(p, rid)
+    r = S.reports.review(r["report_id"], by=p.label, approve=body.approve, conclusion=body.conclusion)
+    S.control._audit("report_review", p.label, r["scope_id"], {"report_id": r["report_id"], "approve": body.approve}, r["status"])
+    return env(_report_meta(r), f"报告 {r['report_id']} {r['status']}")
 
 
 @app.get("/api/health")

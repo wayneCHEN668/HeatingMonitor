@@ -12,6 +12,7 @@ export const menus = [
   { path: '/alarms', title: '报警中心', icon: 'Bell', perm: ['monitor:read'] },
   { path: '/ops', title: '运维工单', icon: 'SetUp', perm: ['ops:read'] },
   { path: '/service', title: '客服中心', icon: 'Headset', perm: ['service:read'] },
+  { path: '/reports', title: '报告中心', icon: 'Document', perm: ['report:read'] },
   { path: '/kb', title: '知识库', icon: 'Reading', perm: ['kb:read'] },
   { path: '/agents', title: '智能体授权', icon: 'Key', perm: ['agent:delegate'] },
 ]
@@ -34,6 +35,8 @@ const router = createRouter({
     { path: '/alarms', component: () => import('@/views/Alarms.vue'), meta: { title: '报警中心' } },
     { path: '/ops', component: () => import('@/views/Ops.vue'), meta: { title: '运维工单' } },
     { path: '/service', component: () => import('@/views/Service.vue'), meta: { title: '客服中心' } },
+    { path: '/reports', component: () => import('@/views/Reports.vue'), meta: { title: '报告中心' } },
+    { path: '/reports/:id', component: () => import('@/views/Reports.vue'), meta: { title: '报告' } },
     { path: '/kb', component: () => import('@/views/KnowledgeBase.vue'), meta: { title: '知识库' } },
     { path: '/agents', component: () => import('@/views/AgentTokens.vue'), meta: { title: '智能体授权' } },
     { path: '/forbidden', component: () => import('@/views/Forbidden.vue'), meta: { title: '无权访问' } },
